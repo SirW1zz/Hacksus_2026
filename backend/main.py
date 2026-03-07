@@ -222,6 +222,49 @@ async def upload_jd(
 
     return {"session_id": session_id, "parsed_jd": parsed_jd}
 
+@app.post("/dev-mock")
+async def dev_mock(session_id: str = Form(...)):
+    """Developer mode: injects a dummy resume, JD, and scorecard to skip setup."""
+    dummy_resume = {
+        "raw_text": "John Doe. Experienced Software Engineer with 5 years in Python and React. Built scalable web apps and led a team of 3 developers.",
+        "skills": ["Python", "React", "TypeScript", "Node.js", "MongoDB"],
+        "experience": [{"title": "Senior Software Engineer", "company": "Tech Corp", "years": 5}]
+    }
+    dummy_jd = "Looking for a Senior Software Engineer with strong Python and frontend frameworks (React/Vue). Must have leadership experience."
+    dummy_scorecard = {
+        "overall_match_score": 85,
+        "match_level": "Strong Match",
+        "competencies": [
+            {"skill": "Python", "score": 9, "match_level": "strong", "reason": "5 years experience listed."},
+            {"skill": "React", "score": 8, "match_level": "strong", "reason": "Built scalable web apps."},
+            {"skill": "Leadership", "score": 7, "match_level": "moderate", "reason": "Led team of 3."}
+        ]
+    }
+    dummy_guide = {
+        "overview": "Strong candidate, focus on system design and leadership depth.",
+        "sections": [
+            {"title": "Technical Depth", "questions": ["Describe a scalable system you built in Python.", "How do you manage state in large React apps?"]}
+        ]
+    }
+    
+    # Update memory
+    active_sessions[session_id] = {
+        "status": "preparing",
+        "resume_data": dummy_resume,
+        "jd_data": dummy_jd,
+        "scorecard": dummy_scorecard,
+        "interview_guide": dummy_guide
+    }
+    
+    # Update DB
+    db_service.store_resume(session_id, dummy_resume)
+    db_service.update_session(session_id, {"resume_uploaded": True, "jd_uploaded": True, "jd_data": dummy_jd, "interview_guide": dummy_guide, "status": "preparing"})
+    
+    return {
+        "session_id": session_id,
+        "status": "success",
+        "message": "Developer mode activated. Dummy data injected."
+    }
 
 # ─────────────────────── Analysis Endpoints ───────────────────────
 

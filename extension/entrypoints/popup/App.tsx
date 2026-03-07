@@ -54,6 +54,53 @@ export default function App() {
     setLoading(false);
   };
 
+  // Start Developer Mode (skip resume/JD upload)
+  const startDevMode = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const form = new FormData();
+      form.append("interviewer", "dev_user");
+      const res = await fetch(`${API_BASE}/session/create`, {
+        method: "POST",
+        body: form,
+      });
+      const data = await res.json();
+      const newSessionId = data.session_id;
+
+      // Call the dev-mock endpoint
+      const mockForm = new FormData();
+      mockForm.append("session_id", newSessionId);
+      await fetch(`${API_BASE}/dev-mock`, {
+        method: "POST",
+        body: mockForm,
+      });
+
+      setSessionId(newSessionId);
+      await chrome.storage.local.set({ sessionId: newSessionId, isLive: true });
+      setStatus("live");
+      
+      // Request side panel to open immediately
+      chrome.runtime.sendMessage({ type: "OPEN_SIDEPANEL" });
+      
+      // If we are already on a meet tab, tell it to start scraping
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.url?.includes("meet.google.com") && tab.id) {
+        chrome.tabs.sendMessage(tab.id, {
+          type: "START_SCRAPING",
+          sessionId: newSessionId,
+        });
+      } else {
+        // Automatically open a new meet if not on one
+        chrome.tabs.create({ url: "https://meet.google.com/new" });
+      }
+
+    } catch (e: any) {
+      setError("Failed to start Developer Mode. Is the backend running?");
+    }
+    setLoading(false);
+  };
+
   // Upload resume
   const uploadResume = async () => {
     if (!resumeFile || !sessionId) return;
@@ -187,6 +234,20 @@ export default function App() {
           >
             {loading ? "Creating..." : "🚀 Create Session"}
           </button>
+          
+          <div style={{ marginTop: "16px", borderTop: "1px dashed #333", paddingTop: "16px" }}>
+            <p style={{ fontSize: "12px", color: "var(--text-dim)", marginBottom: "8px" }}>
+              Testing the side panel? Skip the resume/JD setup:
+            </p>
+            <button
+              className="btn secondary"
+              style={{ width: "100%", background: "rgba(124, 92, 252, 0.1)", color: "var(--accent)" }}
+              onClick={startDevMode}
+              disabled={loading}
+            >
+              🛠️ Developer Mode (Quick Start)
+            </button>
+          </div>
         </div>
       )}
 
