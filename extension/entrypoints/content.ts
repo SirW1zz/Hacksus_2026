@@ -1,8 +1,10 @@
 /**
  * Content script for Google Meet — scrapes Closed Captions from the DOM.
  *
- * Uses MutationObserver to detect CC text changes and sends them to the
- * background script for relay to the backend via WebSocket.
+ * Strategy: Observe the entire document for caption containers. Google Meet
+ * renders captions inside specific containers that we detect via multiple
+ * selector strategies. We poll + observe to handle both initial render and
+ * dynamic updates.
  */
 
 export default defineContentScript({
@@ -15,173 +17,268 @@ export default defineContentScript({
     let isScrapingActive = false;
     let sessionId = "";
     let observer: MutationObserver | null = null;
-    let lastText = "";
-    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
+    let lastSentText = "";
+    let lastSentTime = 0;
 
-    // Known CC container selectors (Google Meet updates these periodically)
-    const CC_SELECTORS = [
-      // Current known selectors for Google Meet captions
-      'div[jscontroller] div[class*="iOzk7"]', // Caption container
-      ".a4cQT", // Speaker name container
-      'div[data-self-name]', // Self-identified speaker
-      'span[dir="ltr"]', // Caption text spans
-      ".TBMuR.bj4p3b", // Caption text wrapper
-      ".zs7s8d.jxFHg", // Caption line
+    /**
+     * All known selectors for Google Meet captions across versions.
+     * We try multiple approaches to find the caption text.
+     */
+    const CAPTION_CONTAINER_SELECTORS = [
+      // Current Google Meet (2024-2026) caption containers
+      'div[jsname="dsyhDe"]',       // Main captions wrapper
+      'div[jsname="YSg2M"]',        // Alt captions wrapper
+      'div[jsname="tgaKEf"]',       // Another caption variant
+      '.a4cQT',                      // Caption bar container class
+      'div[class*="iOzk7"]',        // Caption inner container
+    ];
+
+    const CAPTION_TEXT_SELECTORS = [
+      // Caption text elements
+      '.TBMuR.bj4p3b',              // Caption text wrapper
+      '.zs7s8d.jxFHg',              // Caption line
+      'span[dir="ltr"]',            // LTR text spans inside captions
+      'div[class*="bj4p3b"]',       // Caption text alt class
+    ];
+
+    const SPEAKER_SELECTORS = [
+      '.zs7s8d',                     // Speaker name element
+      'div[class*="KcIKyf"]',       // Speaker name alt
+      'img[alt]',                    // Speaker avatar (alt = name)
     ];
 
     /**
-     * Find the CC container in the DOM.
-     * Google Meet dynamically renders captions, so we try multiple selectors.
+     * Find all caption text currently visible on screen using multiple strategies.
      */
-    function findCaptionContainer(): Element | null {
-      // Try to find the main captions region
-      const captionRegion = document.querySelector(
-        'div[jsname="dsyhDe"]'
-      );
-      if (captionRegion) return captionRegion;
+    function scrapeCaptions(): { speaker: string; text: string }[] {
+      const results: { speaker: string; text: string }[] = [];
 
-      // Fallback: look for common caption wrapper classes
-      const fallbacks = [
-        'div[jsname="YSg2M"]',
-        ".a4cQT",
-        'div[class*="caption"]',
-      ];
-
-      for (const sel of fallbacks) {
-        const el = document.querySelector(sel);
-        if (el) return el;
+      // Strategy 1: Look for known caption containers
+      for (const containerSel of CAPTION_CONTAINER_SELECTORS) {
+        const containers = document.querySelectorAll(containerSel);
+        for (const container of containers) {
+          const text = extractTextFromContainer(container);
+          if (text) {
+            results.push(text);
+          }
+        }
       }
 
-      return null;
+      // Strategy 2: If no containers found, try direct text selectors
+      if (results.length === 0) {
+        for (const textSel of CAPTION_TEXT_SELECTORS) {
+          const elements = document.querySelectorAll(textSel);
+          for (const el of elements) {
+            const content = el.textContent?.trim();
+            if (content && content.length > 2) {
+              results.push({ speaker: "Participant", text: content });
+            }
+          }
+        }
+      }
+
+      // Strategy 3: Broad scan — look for any element that looks like a caption overlay
+      if (results.length === 0) {
+        // Google Meet captions are positioned at the bottom of the video
+        const candidates = document.querySelectorAll('div[style*="bottom"], div[style*="z-index"]');
+        for (const el of candidates) {
+          const text = el.textContent?.trim();
+          // Caption-like: short text, visible, near bottom
+          if (text && text.length > 3 && text.length < 500) {
+            const rect = el.getBoundingClientRect();
+            // Must be in the lower half of the screen and reasonably sized
+            if (rect.bottom > window.innerHeight * 0.6 && rect.height < 200 && rect.height > 10) {
+              // Quick check: skip known non-caption UI elements
+              const tagName = el.tagName.toLowerCase();
+              if (tagName !== 'button' && !el.querySelector('button') && !el.closest('[role="toolbar"]')) {
+                results.push({ speaker: "Participant", text });
+              }
+            }
+          }
+        }
+      }
+
+      return results;
     }
 
     /**
-     * Extract speaker name and text from a caption element.
+     * Extract speaker + text from a caption container element.
      */
-    function extractCaption(
-      element: Element
-    ): { speaker: string; text: string } | null {
-      const text = element.textContent?.trim();
-      if (!text || text === lastText) return null;
+    function extractTextFromContainer(container: Element): { speaker: string; text: string } | null {
+      // Try to get the full text
+      const fullText = container.textContent?.trim();
+      if (!fullText || fullText.length < 2) return null;
 
-      lastText = text;
+      // Try to find the speaker name
+      let speaker = "Participant";
+      for (const sel of SPEAKER_SELECTORS) {
+        const speakerEl = container.querySelector(sel);
+        if (speakerEl) {
+          if (sel.includes('img')) {
+            speaker = (speakerEl as HTMLImageElement).alt || "Participant";
+          } else {
+            const name = speakerEl.textContent?.trim();
+            if (name && name.length > 0 && name.length < 50) {
+              speaker = name;
+            }
+          }
+          break;
+        }
+      }
 
-      // Try to extract speaker name
-      const speakerEl =
-        element.querySelector(".zs7s8d") ||
-        element.querySelector('img[alt]')?.parentElement;
-
-      const speaker = speakerEl?.textContent?.trim() || "Participant";
-
-      // Extract just the caption text (removing speaker name if embedded)
-      let captionText = text;
-      if (speaker && captionText.startsWith(speaker)) {
+      // Remove speaker name from the caption text
+      let captionText = fullText;
+      if (speaker !== "Participant" && captionText.startsWith(speaker)) {
         captionText = captionText.substring(speaker.length).trim();
       }
 
-      if (!captionText) return null;
+      if (!captionText || captionText.length < 2) return null;
 
       return { speaker, text: captionText };
     }
 
     /**
-     * Start observing the DOM for CC changes.
+     * Send caption to background script for relay to backend.
+     * Deduplicates and rate-limits sends.
+     */
+    function sendCaption(speaker: string, text: string) {
+      const now = Date.now();
+      // Deduplicate: skip if same text sent within last 2 seconds
+      if (text === lastSentText && now - lastSentTime < 2000) return;
+      // Rate limit: at least 500ms between sends
+      if (now - lastSentTime < 500) return;
+
+      lastSentText = text;
+      lastSentTime = now;
+
+      console.log(`[Interview Intel] CC: [${speaker}] ${text.substring(0, 80)}...`);
+
+      chrome.runtime.sendMessage({
+        type: "CC_TEXT",
+        sessionId,
+        speaker,
+        text,
+      }).catch(() => {
+        // Background script might not be ready
+      });
+    }
+
+    /**
+     * Poll-based caption scraping. Runs every 1.5 seconds.
+     * This is the primary method — more reliable than pure MutationObserver
+     * because Google Meet's caption DOM can be complex and vary by version.
+     */
+    function startPolling() {
+      if (pollInterval) return;
+
+      console.log("[Interview Intel] Starting caption polling...");
+
+      pollInterval = setInterval(() => {
+        if (!isScrapingActive) return;
+
+        const captions = scrapeCaptions();
+        for (const cap of captions) {
+          sendCaption(cap.speaker, cap.text);
+        }
+      }, 1500);
+    }
+
+    /**
+     * Mutation-based caption scraping. Catches real-time CC updates.
      */
     function startObserving() {
       if (observer) return;
 
-      // Find or wait for the CC container
-      const findAndObserve = () => {
-        const container =
-          findCaptionContainer() || document.body;
+      console.log("[Interview Intel] Starting MutationObserver...");
 
-        observer = new MutationObserver((mutations) => {
-          for (const mutation of mutations) {
-            // Check added nodes
-            for (const node of mutation.addedNodes) {
-              if (node instanceof Element) {
-                const caption = extractCaption(node);
-                if (caption) {
-                  debouncedSend(caption);
+      // Observe the whole document body for caption changes
+      observer = new MutationObserver((mutations) => {
+        if (!isScrapingActive) return;
+
+        for (const mutation of mutations) {
+          // Check newly added nodes
+          for (const node of mutation.addedNodes) {
+            if (node instanceof Element) {
+              const text = node.textContent?.trim();
+              if (text && text.length > 2 && text.length < 500) {
+                // Check if this node matches any caption selector
+                for (const sel of CAPTION_CONTAINER_SELECTORS) {
+                  if (node.matches(sel) || node.querySelector(sel)) {
+                    const result = extractTextFromContainer(node);
+                    if (result) {
+                      sendCaption(result.speaker, result.text);
+                    }
+                    break;
+                  }
+                }
+
+                // Also check text selectors
+                for (const sel of CAPTION_TEXT_SELECTORS) {
+                  if (node.matches(sel)) {
+                    sendCaption("Participant", text);
+                    break;
+                  }
                 }
               }
             }
+          }
 
-            // Check characterData changes (text content changes)
-            if (
-              mutation.type === "characterData" &&
-              mutation.target.parentElement
-            ) {
-              const caption = extractCaption(mutation.target.parentElement);
-              if (caption) {
-                debouncedSend(caption);
-              }
-            }
-
-            // Check subtree modifications
-            if (mutation.type === "childList" && mutation.target instanceof Element) {
-              const caption = extractCaption(mutation.target);
-              if (caption) {
-                debouncedSend(caption);
+          // Character data (text content) changes inside existing elements
+          if (
+            mutation.type === "characterData" &&
+            mutation.target.parentElement
+          ) {
+            const parent = mutation.target.parentElement;
+            const text = parent.textContent?.trim();
+            if (text && text.length > 2 && text.length < 500) {
+              // Check if parent is a caption element
+              for (const sel of [...CAPTION_CONTAINER_SELECTORS, ...CAPTION_TEXT_SELECTORS]) {
+                if (parent.matches(sel) || parent.closest(sel)) {
+                  const container = parent.closest(CAPTION_CONTAINER_SELECTORS.join(",")) || parent;
+                  const result = extractTextFromContainer(container);
+                  if (result) {
+                    sendCaption(result.speaker, result.text);
+                  }
+                  break;
+                }
               }
             }
           }
-        });
-
-        observer.observe(container, {
-          childList: true,
-          subtree: true,
-          characterData: true,
-        });
-
-        console.log("[Interview Intel] CC Observer started");
-      };
-
-      // Retry finding the container every 2 seconds for 30 seconds
-      let attempts = 0;
-      const interval = setInterval(() => {
-        const container = findCaptionContainer();
-        if (container || attempts >= 15) {
-          clearInterval(interval);
-          findAndObserve();
         }
-        attempts++;
-      }, 2000);
+      });
 
-      // Also try immediately
-      findAndObserve();
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
     }
 
     /**
-     * Debounced send to avoid flooding with partial captions.
+     * Start all scraping methods.
      */
-    function debouncedSend(caption: { speaker: string; text: string }) {
-      if (debounceTimer) clearTimeout(debounceTimer);
-
-      debounceTimer = setTimeout(() => {
-        chrome.runtime.sendMessage({
-          type: "CC_TEXT",
-          sessionId,
-          speaker: caption.speaker,
-          text: caption.text,
-        });
-      }, 500);
+    function startScraping() {
+      console.log("[Interview Intel] Starting scraping (poll + observer)...");
+      startPolling();
+      startObserving();
     }
 
     /**
-     * Stop observing.
+     * Stop all scraping.
      */
-    function stopObserving() {
+    function stopScraping() {
       if (observer) {
         observer.disconnect();
         observer = null;
       }
-      if (debounceTimer) {
-        clearTimeout(debounceTimer);
-        debounceTimer = null;
+      if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
       }
-      lastText = "";
-      console.log("[Interview Intel] CC Observer stopped");
+      lastSentText = "";
+      lastSentTime = 0;
+      console.log("[Interview Intel] All scraping stopped");
     }
 
     // Listen for messages from popup/background
@@ -189,11 +286,11 @@ export default defineContentScript({
       if (msg.type === "START_SCRAPING") {
         sessionId = msg.sessionId;
         isScrapingActive = true;
-        startObserving();
+        startScraping();
         sendResponse({ status: "scraping_started" });
       } else if (msg.type === "STOP_SCRAPING") {
         isScrapingActive = false;
-        stopObserving();
+        stopScraping();
         sendResponse({ status: "scraping_stopped" });
       } else if (msg.type === "PING") {
         sendResponse({ status: "alive", scraping: isScrapingActive });
@@ -205,7 +302,7 @@ export default defineContentScript({
       if (data.isLive && data.sessionId) {
         sessionId = data.sessionId;
         isScrapingActive = true;
-        startObserving();
+        startScraping();
       }
     });
   },

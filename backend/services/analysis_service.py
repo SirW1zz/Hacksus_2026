@@ -7,6 +7,55 @@ import json
 from services.gemini_service import call_gemini
 
 
+async def analyze_live_insights(text: str, resume_data: dict, history: str = "") -> dict:
+    """Analyze mood, attitude, speaker, and generate live suggestions in one call."""
+    prompt = f"""You are an expert interview psychologist and coach. Analyze the latest interview segment.
+
+SEGMENT:
+{text}
+
+CONTEXT HISTORY (LAST 1000 WORDS):
+{history[-3000:]}
+
+RESUME SUMMARY:
+{json.dumps(resume_data, indent=2, default=str)[:2000]}
+
+Return EXACTLY this JSON:
+{{
+  "speaker": "Candidate | Interviewer | Both",
+  "mood": "e.g., Chill, Focused, Tense, Academic, Conversational",
+  "attitude": "e.g., Confident, Nervous, Evasive, Enthusiastic",
+  "suggestions": [
+    {{
+      "type": "icebreaker | follow-up | probe | transition",
+      "text": "The exact question or phrase to say",
+      "reason": "Why this is suggested now",
+      "priority": "high | medium | low"
+    }}
+  ],
+  "competency_updates": [
+    {{"skill": "skill_name", "match_level": "strong|moderate|weak", "score_change": -1 to 1, "reason": "..."}}
+  ]
+}}
+
+If the segment is silent or very short, prioritize an "icebreaker" suggesting how to resume or break the tension."""
+
+    text_resp = await call_gemini(prompt)
+    try:
+        data = json.loads(text_resp)
+        # Sanitize competency updates to ensure they have expected fields
+        if "competency_updates" not in data:
+            data["competency_updates"] = []
+        return data
+    except Exception:
+        return {
+            "speaker": "Unknown",
+            "mood": "Neutral",
+            "attitude": "Neutral",
+            "suggestions": [],
+            "competency_updates": []
+        }
+
 async def analyze_transcript_chunk_consolidated(text: str, resume_data: dict) -> dict:
     """Consolidated endpoint to flag vagueness, contradictions, and generate questions in ONE Gemini call."""
     prompt = f"""You are an advanced interview copilot AI. Analyze the candidate's latest verbal statement and compare it to their resume.
@@ -17,10 +66,11 @@ VERBAL STATEMENT:
 RESUME DATA:
 {json.dumps(resume_data, indent=2, default=str)[:3000]}
 
-Perform three tasks and return one comprehensive JSON:
+Perform tasks and return ONE comprehensive JSON:
 1. Vagueness check: Is the answer vague or deflecting?
 2. Contradiction check: Does the verbal claim contradict the resume?
-3. Proactive question: If they said something highly interesting or questionable, formulate ONE sharp follow-up. Do not force an unimportant question.
+3. Insights: Mood and Attitude detection.
+4. Suggestions: 1-2 sharp follow-up or icebreaker questions.
 
 Return EXACTLY this JSON structure:
 {{
@@ -35,11 +85,14 @@ Return EXACTLY this JSON structure:
       {{"verbal_claim": "what they said", "resume_fact": "what resume shows", "suggested_probe": "question to clarify"}}
     ]
   }},
-  "proactive_question": {{
-    "is_important": true/false,
-    "question": "The question, or null",
-    "reason": "Why to ask it, or null"
-  }}
+  "insights": {{
+    "mood": "convo mood",
+    "attitude": "candidate attitude",
+    "speaker": "who's talking"
+  }},
+  "suggestions": [
+     {{"question": "...", "reason": "...", "priority": "high|medium"}}
+  ]
 }}"""
 
     text_resp = await call_gemini(prompt)
@@ -47,7 +100,7 @@ Return EXACTLY this JSON structure:
     try:
         return json.loads(text_resp)
     except Exception:
-        return {"vagueness": {}, "contradictions": {}, "proactive_question": {}}
+        return {"vagueness": {}, "contradictions": {}, "insights": {}, "suggestions": []}
 
 async def detect_vague_answers(text: str) -> dict:
     """Flag non-specific or evasive answers in a transcript chunk."""
@@ -118,30 +171,8 @@ async def detect_bias(transcript_history: str) -> dict:
 TRANSCRIPT:
 {transcript_history[-4000:]}
 
-Look for:
-- Halo effect (over-weighting one positive trait)
-- Affinity bias (bonding over shared backgrounds)
-- Confirmation bias (only seeking evidence for initial impression)
-- Non-evidence-based discussions (too much small talk / off-topic)
-
-Return JSON:
-{{
-  "bias_detected": true/false,
-  "warnings": [
-    {{
-      "type": "halo_effect|affinity_bias|confirmation_bias|off_topic",
-      "severity": "high|medium|low",
-      "description": "...",
-      "evidence": "specific quote or pattern",
-      "recommendation": "what interviewer should do"
-    }}
-  ],
-  "topic_balance": {{
-    "technical_percentage": 0-100,
-    "behavioral_percentage": 0-100,
-    "small_talk_percentage": 0-100
-  }}
-}}"""
+Look for signs of bias (halo, affinity, confirmation, off-topic). 
+Return JSON: {{"bias_detected": bool, "warnings": [...]}}"""
 
     text_resp = await call_gemini(prompt)
 

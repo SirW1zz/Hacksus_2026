@@ -6,7 +6,7 @@ import uuid
 import json
 import asyncio
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, HTTPException
@@ -28,6 +28,7 @@ from services.analysis_service import (
     detect_bias,
     calculate_engagement,
     analyze_transcript_chunk_consolidated,
+    analyze_live_insights,
 )
 from services.deepgram_service import DeepgramTranscriber
 
@@ -335,68 +336,77 @@ async def websocket_interview(websocket: WebSocket, session_id: str):
     db_service.update_session(session_id, {"status": "interviewing"})
     active_sessions[session_id]["status"] = "interviewing"
 
-    # Analysis buffer — accumulate text before analyzing
+    # Analysis state
     analysis_buffer = []
+    last_interaction_time = datetime.now()
     analysis_task = None
 
     async def run_periodic_analysis():
-        """Run analysis every ~60 seconds on accumulated buffer to save Gemini tokens."""
+        """Run analysis every ~45 seconds or if silence is detected to suggest icebreakers."""
+        nonlocal last_interaction_time
         while True:
-            await asyncio.sleep(60)
-            if analysis_buffer:
-                combined = " ".join(analysis_buffer)
-                
-                # Only analyze if there is actually substance (e.g., > 10 words)
-                if len(combined.split()) > 10:
-                    analysis_buffer.clear()
-                else:
-                    continue
-
+            await asyncio.sleep(15) # Check state frequently
+            now = datetime.now()
+            silence_duration = (now - last_interaction_time).total_seconds()
+            
+            # Case 1: Long silence (> 25s) - Suggest an icebreaker
+            if silence_duration > 25 and silence_duration < 40: # Only trigger once per silence period
+                print(f"[Analysis] Silence detected ({round(silence_duration)}s). Suggesting icebreaker...")
                 resume_data = active_sessions.get(session_id, {}).get("resume_data", {}) or {}
+                history = db_service.get_transcript_text(session_id)
+                
+                try:
+                    insights = await analyze_live_insights("...silence...", resume_data, history)
+                    await websocket.send_json({
+                        "type": "live_insights",
+                        "data": insights
+                    })
+                    # Bump interaction time so we don't spam icebreakers
+                    last_interaction_time = now - timedelta(seconds=10)
+                except Exception as e:
+                    print(f"[Analysis] Icebreaker error: {e}")
+
+            # Case 2: Gathered enough text - Perform standard insights/warnings update
+            if analysis_buffer and (len(" ".join(analysis_buffer).split()) > 15 or silence_duration > 45):
+                combined = " ".join(analysis_buffer)
+                analysis_buffer.clear()
+                last_interaction_time = now
+                
+                resume_data = active_sessions.get(session_id, {}).get("resume_data", {}) or {}
+                history = db_service.get_transcript_text(session_id)
 
                 try:
-                    # 1. Check Bias (Separate because it checks the entire history)
-                    full_transcript = db_service.get_transcript_text(session_id)
-                    bias = await detect_bias(full_transcript)
-                    if bias.get("bias_detected"):
+                    # 1. Consolidated Analysis: Insights, Suggestions, Mood, Attitude
+                    analysis_res = await analyze_transcript_chunk_consolidated(combined, resume_data)
+                    
+                    # Broadcast detailed insights
+                    await websocket.send_json({
+                        "type": "live_insights",
+                        "data": {
+                            "mood": analysis_res.get("insights", {}).get("mood", "Conversational"),
+                            "attitude": analysis_res.get("insights", {}).get("attitude", "Interested"),
+                            "speaker": analysis_res.get("insights", {}).get("speaker", "Both"),
+                            "suggestions": analysis_res.get("suggestions", [])
+                        }
+                    })
+
+                    # 2. Check Warnings (Vagueness/Contradictions)
+                    if analysis_res.get("vagueness", {}).get("is_vague"):
                         await websocket.send_json({
                             "type": "warning",
-                            "subtype": "bias",
-                            "data": bias,
+                            "subtype": "vague_answer",
+                            "data": analysis_res["vagueness"],
+                        })
+                        
+                    if analysis_res.get("contradictions", {}).get("contradictions"):
+                        await websocket.send_json({
+                            "type": "warning",
+                            "subtype": "contradiction",
+                            "data": analysis_res["contradictions"],
                         })
 
-                    # 2. Consolidated check: Vagueness, Contradictions, and Proactive Question (1 Gemini call)
-                    if resume_data:
-                        analysis_res = await analyze_transcript_chunk_consolidated(combined, resume_data)
-                        
-                        # Vagueness
-                        vagueness = analysis_res.get("vagueness", {})
-                        if vagueness.get("is_vague"):
-                            await websocket.send_json({
-                                "type": "warning",
-                                "subtype": "vague_answer",
-                                "data": vagueness,
-                            })
-                            
-                        # Contradictions
-                        contradictions = analysis_res.get("contradictions", {})
-                        if contradictions.get("contradictions"):
-                            await websocket.send_json({
-                                "type": "warning",
-                                "subtype": "contradiction",
-                                "data": contradictions,
-                            })
-                            
-                        # Proactive questions based on interesting data
-                        proactive = analysis_res.get("proactive_question", {})
-                        if proactive.get("is_important") and proactive.get("question"):
-                            await websocket.send_json({
-                                "type": "live_question",
-                                "data": proactive,
-                            })
-
                 except Exception as e:
-                    print(f"[Analysis] Error: {e}")
+                    print(f"[Analysis] Main loop error: {e}")
 
     # Start periodic analysis
     analysis_task = asyncio.create_task(run_periodic_analysis())
@@ -405,6 +415,7 @@ async def websocket_interview(websocket: WebSocket, session_id: str):
         while True:
             data = await websocket.receive_json()
             msg_type = data.get("type")
+            last_interaction_time = datetime.now() # Reset silence timer
 
             if msg_type == "cc_text":
                 # Handle CC-scraped text from Google Meet

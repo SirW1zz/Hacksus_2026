@@ -97,20 +97,30 @@ export default defineBackground(() => {
         break;
 
       case "OPEN_SIDEPANEL":
-        // Open the side panel
-        if (sender.tab?.windowId) {
-          chrome.sidePanel
-            .open({ windowId: sender.tab.windowId })
-            .catch(console.error);
-        } else {
-          chrome.windows.getCurrent((window) => {
-            if (window.id) {
-              chrome.sidePanel
-                .open({ windowId: window.id })
-                .catch(console.error);
+        // Open the side panel — try meet tab first, then current window
+        (async () => {
+          try {
+            // First, try to find an active Google Meet tab
+            const meetTabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
+            if (meetTabs.length > 0 && meetTabs[0].id) {
+              await chrome.sidePanel.setOptions({
+                tabId: meetTabs[0].id,
+                path: 'sidepanel.html',
+                enabled: true
+              });
+              await chrome.sidePanel.open({ tabId: meetTabs[0].id });
+            } else if (sender.tab?.windowId) {
+              await chrome.sidePanel.open({ windowId: sender.tab.windowId });
+            } else {
+              const win = await chrome.windows.getCurrent();
+              if (win.id) {
+                await chrome.sidePanel.open({ windowId: win.id });
+              }
             }
-          });
-        }
+          } catch (err) {
+            console.error("[Interview Intel] OPEN_SIDEPANEL error:", err);
+          }
+        })();
         sendResponse({ status: "opening_sidepanel" });
         break;
 

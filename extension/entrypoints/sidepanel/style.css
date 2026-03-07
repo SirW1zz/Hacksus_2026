@@ -547,84 +547,218 @@ body {
   background: rgba(255, 77, 106, 0.2);
 }
 
-/* ── Scrollbar ── */
-.sp-content::-webkit-scrollbar {
-  width: 3px;
+/* ── Insights Panel ── */
+.insights-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  animation: fadeIn 0.4s ease-out;
 }
 
-.sp-content::-webkit-scrollbar-track {
-  background: transparent;
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
-.sp-content::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.08);
-  border-radius: 2px;
+/* ── Live Status Grid ── */
+.live-status-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
 }
 
-/* ── Live Question Toast ── */
-.live-question-toast {
-  position: absolute;
-  bottom: 80px;
-  left: 16px;
-  right: 16px;
-  background: rgba(20, 20, 36, 0.95);
-  border: 1px solid var(--accent);
-  box-shadow: 0 4px 20px rgba(124, 92, 252, 0.4);
-  border-radius: 8px;
+.status-card {
   padding: 12px;
-  z-index: 1000;
-  backdrop-filter: blur(10px);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
 }
 
-.slide-up {
-  animation: slideUp 0.3s ease-out forwards;
+.status-card::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  opacity: 0.5;
 }
 
-@keyframes slideUp {
-  from { transform: translateY(20px); opacity: 0; }
-  to { transform: translateY(0); opacity: 1; }
+.status-card.speaker::after { background: var(--accent); }
+.status-card.mood::after { background: var(--blue); }
+.status-card.attitude::after { background: var(--success); }
+
+.status-card.speaker {
+  grid-column: span 2;
 }
 
-.toast-header {
+.sc-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+}
+
+.sc-val {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.status-card.speaker .sc-val {
+  color: var(--accent2);
+}
+
+/* ── Suggestions Area ── */
+.suggestions-area h3 {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 12px;
   display: flex;
   align-items: center;
-  margin-bottom: 6px;
+  gap: 8px;
 }
 
-.toast-header strong {
-  flex: 1;
-  font-size: 11px;
-  color: var(--accent);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-left: 6px;
-}
-
-.toast-icon {
-  font-size: 14px;
-}
-
-.close-toast {
-  background: none;
-  border: none;
+.suggestion-empty {
+  font-size: 12px;
   color: var(--text-dim);
-  font-size: 18px;
-  cursor: pointer;
-  line-height: 1;
+  font-style: italic;
+  padding: 20px;
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
 }
 
-.close-toast:hover {
-  color: var(--text);
+.suggest-item {
+  padding: 14px;
+  border-radius: var(--radius);
+  background: var(--bg-glass);
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  position: relative;
+  transition: transform 0.2s;
 }
 
-.toast-question {
+.suggest-item:hover {
+  transform: translateX(4px);
+  border-color: rgba(124, 92, 252, 0.4);
+}
+
+.suggest-item.priority-high {
+  border-left: 4px solid var(--danger);
+}
+
+.suggest-item.priority-medium {
+  border-left: 4px solid var(--warning);
+}
+
+.suggest-text {
   font-size: 13px;
   font-weight: 600;
-  color: var(--text);
+  color: #fff;
+  margin-bottom: 6px;
+  line-height: 1.4;
+}
+
+.suggest-reason {
+  font-size: 11px;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+/* ── Live Competency Tracker (Insights) ── */
+.live-comp-tracker {
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: var(--radius);
+  padding: 12px;
+  border: 1px solid var(--border);
+}
+
+.live-comp-tracker h3 {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+
+.comp-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.comp-header {
+  display: flex;
+  justify-content: space-between;
   margin-bottom: 4px;
 }
 
-.toast-reason {
+.comp-name {
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 80px;
+}
+
+.comp-score {
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.comp-bar-mini {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 2px;
+}
+
+.comp-fill-mini {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 1s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ── Mini Transcript ── */
+.mini-transcript {
+  margin-top: auto;
+  padding: 12px;
+  background: linear-gradient(to bottom, rgba(0,0,0,0), rgba(124, 92, 252, 0.05));
+  border-radius: var(--radius);
+  border-top: 1px solid var(--border);
+}
+
+.mt-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accent);
+  text-transform: uppercase;
+}
+
+.mt-text {
   font-size: 11px;
   color: var(--text-dim);
+  margin-top: 4px;
+  font-style: italic;
+  line-height: 1.4;
 }
+
+/* ── Overrides for existing tabs ── */
+.competency-section {
+  display: none; /* Hidden because we show it in Insights now, or kept purely for other tabs */
+}
+
+.tab:active { transform: scale(0.95); }

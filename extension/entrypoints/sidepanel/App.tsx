@@ -31,10 +31,21 @@ export default function App() {
   const [competencies, setCompetencies] = useState<any[]>([]);
   const [guide, setGuide] = useState<any>(null);
   const [activeTab, setActiveTab] = useState<
-    "transcript" | "questions" | "alerts"
-  >("transcript");
+    "insights" | "questions" | "alerts"
+  >("insights");
   const [elapsedTime, setElapsedTime] = useState(0);
   const [liveQuestion, setLiveQuestion] = useState<{question: string, reason: string} | null>(null);
+  const [insights, setInsights] = useState<{
+    mood: string;
+    attitude: string;
+    speaker: string;
+    suggestions: any[];
+  }>({
+    mood: "Conversational",
+    attitude: "Natural",
+    speaker: "Ready",
+    suggestions: []
+  });
 
   const wsRef = useRef<WebSocket | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
@@ -102,6 +113,35 @@ export default function App() {
             timestamp: new Date().toLocaleTimeString(),
           },
         ]);
+        // Update current speaker insight immediately
+        setInsights(prev => ({ ...prev, speaker: msg.speaker }));
+
+      } else if (msg.type === "live_insights") {
+        setInsights({
+          mood: msg.data.mood || insights.mood,
+          attitude: msg.data.attitude || insights.attitude,
+          speaker: msg.data.speaker || insights.speaker,
+          suggestions: msg.data.suggestions || []
+        });
+
+        // If there are competency updates, apply them
+        if (msg.data.competency_updates) {
+          setCompetencies(prev => {
+            const next = [...prev];
+            msg.data.competency_updates.forEach((update: any) => {
+              const idx = next.findIndex(c => c.skill.toLowerCase() === update.skill.toLowerCase());
+              if (idx !== -1) {
+                next[idx] = { 
+                  ...next[idx], 
+                  score: Math.max(0, Math.min(10, next[idx].score + (update.score_change || 0))),
+                  match_level: update.match_level || next[idx].match_level
+                };
+              }
+            });
+            return next;
+          });
+        }
+
       } else if (msg.type === "warning") {
         setWarnings((prev) => [
           ...prev,
@@ -195,10 +235,10 @@ export default function App() {
       {/* Tab Bar */}
       <nav className="tab-bar">
         <button
-          className={`tab ${activeTab === "transcript" ? "active" : ""}`}
-          onClick={() => setActiveTab("transcript")}
+          className={`tab ${activeTab === "insights" ? "active" : ""}`}
+          onClick={() => setActiveTab("insights")}
         >
-          💬 Transcript
+          ✨ Insights
         </button>
         <button
           className={`tab ${activeTab === "questions" ? "active" : ""}`}
@@ -219,29 +259,75 @@ export default function App() {
 
       {/* Content Area */}
       <div className="sp-content">
-        {/* Transcript Tab */}
-        {activeTab === "transcript" && (
-          <div className="transcript-feed">
-            {transcript.length === 0 ? (
-              <div className="empty-state">
-                <span className="empty-icon">🎙️</span>
-                <p>Waiting for conversation...</p>
-                <p className="empty-sub">
-                  Transcript will appear as the interview progresses
-                </p>
+        {/* Insights Tab (New Main Tab) */}
+        {activeTab === "insights" && (
+          <div className="insights-panel">
+            {/* Real-time Status Area */}
+            <div className="live-status-grid">
+              <div className="status-card speaker">
+                <span className="sc-label">Speaking Now</span>
+                <span className="sc-val">{insights.speaker}</span>
               </div>
-            ) : (
-              transcript.map((entry, i) => (
-                <div key={i} className={`transcript-entry ${entry.speaker.includes("0") ? "interviewer" : "candidate"}`}>
-                  <div className="entry-header">
-                    <span className="entry-speaker">{entry.speaker}</span>
-                    <span className="entry-time">{entry.timestamp}</span>
-                  </div>
-                  <p className="entry-text">{entry.text}</p>
+              <div className="status-card mood">
+                <span className="sc-label">Convo Mood</span>
+                <span className="sc-val">{insights.mood}</span>
+              </div>
+              <div className="status-card attitude">
+                <span className="sc-label">Candidate Attitude</span>
+                <span className="sc-val">{insights.attitude}</span>
+              </div>
+            </div>
+
+            {/* Live Suggestions Area */}
+            <div className="suggestions-area">
+              <h3>⚡ Dynamic Suggestions</h3>
+              {insights.suggestions.length === 0 ? (
+                <div className="suggestion-empty">
+                  Monitoring conversation for suggestions...
                 </div>
-              ))
+              ) : (
+                insights.suggestions.map((s, i) => (
+                  <div key={i} className={`suggest-item priority-${s.priority || 'medium'}`}>
+                    <p className="suggest-text">{s.text}</p>
+                    <span className="suggest-reason">💡 {s.reason}</span>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* Mini Live Competency Tracker at bottom of insights */}
+            {competencies.length > 0 && (
+              <div className="live-comp-tracker">
+                <h3>📊 Competency Snapshot (Live)</h3>
+                <div className="comp-grid">
+                  {competencies.slice(0, 4).map((c: any, i: number) => (
+                    <div key={i} className="comp-item">
+                      <div className="comp-header">
+                        <span className="comp-name">{c.skill}</span>
+                        <span className="comp-score">{c.score}/10</span>
+                      </div>
+                      <div className="comp-bar-mini">
+                        <div 
+                          className="comp-fill-mini" 
+                          style={{ 
+                            width: `${(c.score / 10) * 100}%`,
+                            background: c.score > 7 ? '#10b981' : c.score > 4 ? '#f59e0b' : '#ef4444'
+                          }} 
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
-            <div ref={transcriptEndRef} />
+
+            {/* Mini Transcript Summary or toggle */}
+            <div className="mini-transcript">
+              <span className="mt-label">Latest:</span>
+              <p className="mt-text">
+                {transcript.length > 0 ? transcript[transcript.length - 1].text : "Waiting for start..."}
+              </p>
+            </div>
           </div>
         )}
 
