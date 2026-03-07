@@ -1,8 +1,9 @@
 /**
- * Background script — message relay and WebSocket management.
+ * Background script — orchestrates tab audio capture, Deepgram relay,
+ * WebSocket management, and side panel.
  *
- * Bridges communication between content script (CC scraper) and
- * the backend WebSocket for real-time interview processing.
+ * Audio pipeline: tabCapture → offscreen document → Deepgram WS → transcript
+ *   → background → backend WS → analysis
  */
 
 export default defineBackground(() => {
@@ -10,67 +11,51 @@ export default defineBackground(() => {
 
   const HTTP_BASE = import.meta.env.WXT_API_BASE || "http://localhost:8000";
   const WS_BASE = HTTP_BASE.replace("http", "ws");
-  
+  const DEEPGRAM_KEY = import.meta.env.WXT_DEEPGRAM_KEY || "";
+
   let ws: WebSocket | null = null;
   let currentSessionId = "";
+  let isCapturing = false;
 
-  /**
-   * Connect to the backend WebSocket for a session.
-   */
+  // ─────────────── Backend WebSocket ───────────────
+
   function connectWebSocket(sessionId: string) {
-    if (ws && ws.readyState === WebSocket.OPEN && currentSessionId === sessionId) {
-      return; // Already connected
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) && currentSessionId === sessionId) {
+      return;
     }
-
-    // Close existing connection
-    if (ws) {
-      ws.close();
-    }
+    if (ws) ws.close();
 
     currentSessionId = sessionId;
     ws = new WebSocket(`${WS_BASE}/ws/interview/${sessionId}`);
 
     ws.onopen = () => {
-      console.log(`[Interview Intel] WebSocket connected for session ${sessionId}`);
+      console.log(`[Interview Intel] Backend WS connected for session ${sessionId}`);
     };
 
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
-        // Forward messages to the side panel
-        chrome.runtime.sendMessage({
-          type: "WS_MESSAGE",
-          data: msg,
-        }).catch(() => {
-          // Side panel might not be open yet
-        });
+        chrome.runtime.sendMessage({ type: "WS_MESSAGE", data: msg }).catch(() => {});
       } catch (e) {
         console.error("[Interview Intel] Failed to parse WS message:", e);
       }
     };
 
-    ws.onerror = (err) => {
-      console.error("[Interview Intel] WebSocket error:", err);
-    };
+    ws.onerror = (err) => console.error("[Interview Intel] Backend WS error:", err);
 
     ws.onclose = () => {
-      console.log("[Interview Intel] WebSocket disconnected");
+      console.log("[Interview Intel] Backend WS disconnected");
       ws = null;
     };
   }
 
-  /**
-   * Send data to the backend via WebSocket.
-   */
   function sendToBackend(data: object) {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(data));
     } else {
-      console.warn("[Interview Intel] WebSocket not connected, queuing message");
-      // Try to reconnect
+      console.warn("[Interview Intel] Backend WS not connected, attempting reconnect...");
       if (currentSessionId) {
         connectWebSocket(currentSessionId);
-        // Retry after a short delay
         setTimeout(() => {
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify(data));
@@ -80,11 +65,97 @@ export default defineBackground(() => {
     }
   }
 
-  // Listen for messages from content script and popup
+  // ─────────────── Tab Audio Capture ───────────────
+
+  async function ensureOffscreenDocument() {
+    const existingContexts = await (chrome as any).runtime.getContexts({
+      contextTypes: ["OFFSCREEN_DOCUMENT"],
+    });
+    if (existingContexts.length > 0) return; // Already exists
+
+    await chrome.offscreen.createDocument({
+      url: "offscreen.html",
+      reasons: [chrome.offscreen.Reason.USER_MEDIA],
+      justification: "Capture tab audio for real-time transcription via Deepgram",
+    });
+    console.log("[Interview Intel] Offscreen document created");
+  }
+
+  async function startTabCapture(tabId: number, sessionId: string) {
+    if (isCapturing) {
+      console.log("[Interview Intel] Already capturing, skipping...");
+      return;
+    }
+
+    try {
+      // Get the Deepgram key from storage (set during session creation)
+      const stored = await chrome.storage.local.get(["deepgramKey"]);
+      const deepgramKey = stored.deepgramKey || DEEPGRAM_KEY;
+
+      if (!deepgramKey) {
+        console.error("[Interview Intel] No Deepgram API key found!");
+        return;
+      }
+
+      // Get a media stream ID for the tab
+      const streamId = await new Promise<string>((resolve, reject) => {
+        chrome.tabCapture.getMediaStreamId({ targetTabId: tabId }, (id) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else {
+            resolve(id);
+          }
+        });
+      });
+      console.log("[Interview Intel] Got stream ID for tab", tabId);
+
+      // Create offscreen document
+      await ensureOffscreenDocument();
+
+      // Tell offscreen document to start capturing
+      await chrome.runtime.sendMessage({
+        type: "START_CAPTURE",
+        streamId,
+        deepgramKey,
+        sessionId,
+      });
+
+      isCapturing = true;
+      console.log("[Interview Intel] Tab capture started for tab", tabId);
+    } catch (err) {
+      console.error("[Interview Intel] Failed to start tab capture:", err);
+      // Fall back to CC scraping — the content script's polling should still work
+    }
+  }
+
+  async function stopTabCapture() {
+    if (!isCapturing) return;
+
+    try {
+      await chrome.runtime.sendMessage({ type: "STOP_CAPTURE" });
+    } catch {}
+
+    // Close offscreen document
+    try {
+      const existingContexts = await (chrome as any).runtime.getContexts({
+        contextTypes: ["OFFSCREEN_DOCUMENT"],
+      });
+      if (existingContexts.length > 0) {
+        await chrome.offscreen.closeDocument();
+      }
+    } catch {}
+
+    isCapturing = false;
+    console.log("[Interview Intel] Tab capture stopped");
+  }
+
+  // ─────────────── Message Handling ───────────────
+
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     switch (msg.type) {
-      case "CC_TEXT":
-        // Relay CC text from content script to backend
+      // === Deepgram transcript from offscreen document ===
+      case "DEEPGRAM_TRANSCRIPT":
+        // Relay to backend WS (reuse cc_text pipeline)
         if (!ws || ws.readyState !== WebSocket.OPEN) {
           connectWebSocket(msg.sessionId);
         }
@@ -93,29 +164,96 @@ export default defineBackground(() => {
           speaker: msg.speaker,
           text: msg.text,
         });
+        // Also forward to sidepanel for immediate transcript display
+        chrome.runtime.sendMessage({
+          type: "WS_MESSAGE",
+          data: {
+            type: "transcript",
+            speaker: msg.speaker,
+            text: msg.text,
+            is_final: true,
+          },
+        }).catch(() => {});
         sendResponse({ status: "relayed" });
         break;
 
+      case "DEEPGRAM_UTTERANCE_END":
+        // Natural pause in speech — good time for suggestions
+        sendToBackend({ type: "utterance_end" });
+        sendResponse({ status: "ok" });
+        break;
+
+      case "DEEPGRAM_STATUS":
+        // Forward Deepgram connection status to sidepanel
+        chrome.runtime.sendMessage({
+          type: "WS_MESSAGE",
+          data: { type: "deepgram_status", status: msg.status },
+        }).catch(() => {});
+        sendResponse({ status: "ok" });
+        break;
+
+      // === CC text from content script ===
+      case "CC_TEXT":
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          connectWebSocket(msg.sessionId);
+        }
+        sendToBackend({
+          type: "cc_text",
+          speaker: msg.speaker,
+          text: msg.text,
+        });
+        // ALSO forward to sidepanel for immediate display
+        chrome.runtime.sendMessage({
+          type: "WS_MESSAGE",
+          data: {
+            type: "transcript",
+            speaker: msg.speaker,
+            text: msg.text,
+            is_final: true,
+          },
+        }).catch(() => {});
+        sendResponse({ status: "relayed" });
+        break;
+
+      // === Start tab capture ===
+      case "START_TAB_CAPTURE":
+        (async () => {
+          // Resolve tab ID from sender or active meet tab
+          let tabId = msg.tabId || sender.tab?.id;
+          if (!tabId) {
+            const meetTabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
+            tabId = meetTabs[0]?.id;
+          }
+          if (tabId) {
+            await startTabCapture(tabId, msg.sessionId);
+          } else {
+            console.warn("[Interview Intel] No Meet tab found for tab capture");
+          }
+          sendResponse({ status: "started" });
+        })();
+        return true; // async response
+
+      // === Stop tab capture ===
+      case "STOP_TAB_CAPTURE":
+        (async () => {
+          await stopTabCapture();
+          sendResponse({ status: "stopped" });
+        })();
+        return true;
+
+      // === Side panel fallback ===
       case "OPEN_SIDEPANEL":
-        // Open the side panel — try meet tab first, then current window
+        // Cannot open side panel via message (requires user gesture)
+        // This is now purely setting the options so it is enabled manually
         (async () => {
           try {
-            // First, try to find an active Google Meet tab
             const meetTabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
             if (meetTabs.length > 0 && meetTabs[0].id) {
               await chrome.sidePanel.setOptions({
                 tabId: meetTabs[0].id,
-                path: 'sidepanel.html',
-                enabled: true
+                path: "sidepanel.html",
+                enabled: true,
               });
-              await chrome.sidePanel.open({ tabId: meetTabs[0].id });
-            } else if (sender.tab?.windowId) {
-              await chrome.sidePanel.open({ windowId: sender.tab.windowId });
-            } else {
-              const win = await chrome.windows.getCurrent();
-              if (win.id) {
-                await chrome.sidePanel.open({ windowId: win.id });
-              }
             }
           } catch (err) {
             console.error("[Interview Intel] OPEN_SIDEPANEL error:", err);
@@ -124,16 +262,14 @@ export default defineBackground(() => {
         sendResponse({ status: "opening_sidepanel" });
         break;
 
+      // === WS management ===
       case "CONNECT_WS":
         connectWebSocket(msg.sessionId);
         sendResponse({ status: "connecting" });
         break;
 
       case "DISCONNECT_WS":
-        if (ws) {
-          ws.close();
-          ws = null;
-        }
+        if (ws) { ws.close(); ws = null; }
         sendResponse({ status: "disconnected" });
         break;
 
@@ -144,12 +280,8 @@ export default defineBackground(() => {
 
       case "END_INTERVIEW":
         sendToBackend({ type: "end_interview" });
-        setTimeout(() => {
-          if (ws) {
-            ws.close();
-            ws = null;
-          }
-        }, 1000);
+        stopTabCapture();
+        setTimeout(() => { if (ws) { ws.close(); ws = null; } }, 1000);
         sendResponse({ status: "ending" });
         break;
 
@@ -157,54 +289,51 @@ export default defineBackground(() => {
         break;
     }
 
-    // Return true to indicate async sendResponse
     return true;
   });
 
-  // Auto-connect if there's an active session
+  // ─────────────── Auto-connect & Side Panel ───────────────
+
   chrome.storage.local.get(["sessionId", "isLive"], (data) => {
     if (data.isLive && data.sessionId) {
       connectWebSocket(data.sessionId);
     }
   });
 
-  // Function to open side panel for a specific tab
   async function ensureSidePanelOpen(tabId: number) {
     try {
-      const data = await chrome.storage.local.get(["isLive"]);
-      if (!data.isLive) return;
+      const data = await chrome.storage.local.get(["isLive", "sessionId"]);
+      if (!data.isLive || !data.sessionId) return;
 
-      console.log(`[Interview Intel] Ensuring side panel is open for tab ${tabId}`);
+      // Enable side panel for this tab
+      await chrome.sidePanel.setOptions({ tabId, path: "sidepanel.html", enabled: true });
 
-      // Ensure side panel is enabled for this tab
-      await chrome.sidePanel.setOptions({
-        tabId,
-        path: 'sidepanel.html',
-        enabled: true
+      // Ensure the backend WebSocket is connected
+      connectWebSocket(data.sessionId);
+
+      // Tell the content script to start scraping if it hasn't already
+      chrome.tabs.sendMessage(tabId, {
+        type: "START_SCRAPING",
+        sessionId: data.sessionId,
+      }).catch(() => {
+        // Content script might not be loaded yet, that's fine
       });
 
-      // Attempt to open
-      await chrome.sidePanel.open({ tabId });
-      console.log(`[Interview Intel] Side panel open request sent for tab ${tabId}`);
+      // Also try tab capture for Deepgram (bonus quality)
+      if (!isCapturing) {
+        await startTabCapture(tabId, data.sessionId).catch(() => {});
+      }
     } catch (err) {
-      console.error(`[Interview Intel] Failed to open side panel for tab ${tabId}:`, err);
-      // Fallback: try opening by windowId
-      chrome.windows.getCurrent((win) => {
-        if (win.id) {
-          chrome.sidePanel.open({ windowId: win.id }).catch(console.error);
-        }
-      });
+      console.error(`[Interview Intel] Failed to setup side panel for tab ${tabId}:`, err);
     }
   }
 
-  // Automatically open side panel when a Google Meet tab is opened or updated in live mode
   chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     if (changeInfo.status === "complete" && tab.url?.includes("meet.google.com")) {
       ensureSidePanelOpen(tabId);
     }
   });
 
-  // Also catch tab activation
   chrome.tabs.onActivated.addListener(async (activeInfo) => {
     const tab = await chrome.tabs.get(activeInfo.tabId);
     if (tab.url?.includes("meet.google.com")) {
@@ -212,12 +341,24 @@ export default defineBackground(() => {
     }
   });
 
-  // Also catch window creation/focus
   chrome.windows.onFocusChanged.addListener(async (windowId) => {
     if (windowId === chrome.windows.WINDOW_ID_NONE) return;
     const [tab] = await chrome.tabs.query({ active: true, windowId });
     if (tab?.id && tab.url?.includes("meet.google.com")) {
       ensureSidePanelOpen(tab.id);
+    }
+  });
+
+  chrome.tabs.onRemoved.addListener(async (tabId) => {
+    if (isCapturing) {
+      const meetTabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
+      if (meetTabs.length === 0) {
+        console.log("[Interview Intel] Last Meet tab closed, ending session automatically.");
+        sendToBackend({ type: "end_interview" });
+        stopTabCapture();
+        setTimeout(() => { if (ws) { ws.close(); ws = null; } }, 1000);
+        chrome.storage.local.set({ isLive: false, sessionId: "" }).catch(() => {});
+      }
     }
   });
 });

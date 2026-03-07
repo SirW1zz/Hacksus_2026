@@ -189,6 +189,9 @@ RESUME DATA:
 
 Return JSON:
 {{
+  "candidate_name": "Extract their name from the resume or transcript, or Unknown",
+  "overall_mood": "e.g., Chill, Focused, Tense, Academic, Conversational",
+  "overall_attitude": "e.g., Confident, Nervous, Evasive, Enthusiastic",
   "tldr": "2-3 sentence summary of the interview",
   "overall_recommendation": "strong_hire|hire|maybe|no_hire|strong_no_hire",
   "confidence_level": 0-100,

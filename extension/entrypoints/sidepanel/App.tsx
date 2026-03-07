@@ -49,7 +49,6 @@ export default function App() {
     suggestions: []
   });
 
-  const wsRef = useRef<WebSocket | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -72,16 +71,10 @@ export default function App() {
             }
           }
         } catch {}
-
-        // Connect WebSocket
-        if (data.isLive) {
-          connectWs(data.sessionId);
-        }
       }
     });
 
     return () => {
-      wsRef.current?.close();
       if (timerRef.current) clearInterval(timerRef.current);
     };
   }, []);
@@ -91,114 +84,131 @@ export default function App() {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [transcript]);
 
-  const connectWs = (sid: string) => {
-    const WS_BASE = API_BASE.replace("http", "ws");
-    const ws = new WebSocket(`${WS_BASE}/ws/interview/${sid}`);
+  // Listen for messages from background script — register IMMEDIATELY on mount
+  // so we don't miss early transcripts
+  useEffect(() => {
+    const messageListener = (msg: any) => {
+      if (msg.type !== "WS_MESSAGE") return;
 
-    ws.onopen = () => {
-      setIsConnected(true);
-      // Start timer
-      timerRef.current = setInterval(() => {
-        setElapsedTime((t) => t + 1);
-      }, 1000);
-    };
-
-    ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
-
-      if (msg.type === "transcript") {
-        setTranscript((prev) => [
-          ...prev,
-          {
-            speaker: msg.speaker,
-            text: msg.text,
-            timestamp: new Date().toLocaleTimeString(),
-          },
-        ]);
-        // Update current speaker insight immediately
-        setInsights(prev => ({ ...prev, speaker: msg.speaker }));
-
-      } else if (msg.type === "live_insights") {
-        setInsights(prev => ({
-          mood: msg.data.mood || prev.mood,
-          attitude: msg.data.attitude || prev.attitude,
-          honesty: msg.data.honesty || prev.honesty,
-          speaker: msg.data.speaker || prev.speaker,
-          suggestions: msg.data.suggestions || []
+      const data = msg.data;
+      if (data.type === "transcript") {
+        setTranscript((prev) => {
+          // Dedup: don't add if last entry has same text
+          if (prev.length > 0 && prev[prev.length - 1].text === data.text) {
+            return prev;
+          }
+          return [
+            ...prev,
+            {
+              speaker: data.speaker,
+              text: data.text,
+              timestamp: new Date().toLocaleTimeString(),
+            },
+          ];
+        });
+        setInsights((prev) => ({ ...prev, speaker: data.speaker }));
+      } else if (data.type === "live_insights") {
+        setInsights((prev) => ({
+          mood: data.data.mood || prev.mood,
+          attitude: data.data.attitude || prev.attitude,
+          honesty: data.data.honesty || prev.honesty,
+          speaker: data.data.speaker || prev.speaker,
+          suggestions: data.data.suggestions || [],
         }));
 
-        // If there are competency updates, apply them
-        if (msg.data.competency_updates) {
-          setCompetencies(prev => {
+        if (data.data.competency_updates) {
+          setCompetencies((prev) => {
             const next = [...prev];
-            msg.data.competency_updates.forEach((update: any) => {
-              const idx = next.findIndex(c => c.skill.toLowerCase() === update.skill.toLowerCase());
+            data.data.competency_updates.forEach((update: any) => {
+              const idx = next.findIndex(
+                (c) => c.skill.toLowerCase() === update.skill.toLowerCase()
+              );
               if (idx !== -1) {
-                next[idx] = { 
-                  ...next[idx], 
+                next[idx] = {
+                  ...next[idx],
                   score: Math.max(0, Math.min(10, next[idx].score + (update.score_change || 0))),
-                  match_level: update.match_level || next[idx].match_level
+                  match_level: update.match_level || next[idx].match_level,
                 };
               }
             });
             return next;
           });
         }
-
-      } else if (msg.type === "warning") {
+      } else if (data.type === "warning") {
         setWarnings((prev) => [
           ...prev,
           {
-            type: msg.type,
-            subtype: msg.subtype,
-            data: msg.data,
+            type: data.type,
+            subtype: data.subtype,
+            data: data.data,
             timestamp: new Date().toLocaleTimeString(),
           },
         ]);
-      } else if (msg.type === "followup") {
-        const data = msg.data;
+      } else if (data.type === "followup") {
+        const payload = data.data;
         const items: Followup[] = [];
-        if (data.immediate_followup?.question) {
+        if (payload.immediate_followup?.question) {
           items.push({
-            question: data.immediate_followup.question,
-            reason: data.immediate_followup.reason,
+            question: payload.immediate_followup.question,
+            reason: payload.immediate_followup.reason,
             priority: "high",
           });
         }
-        if (data.probing_questions) {
-          items.push(...data.probing_questions);
+        if (payload.probing_questions) {
+          items.push(...payload.probing_questions);
         }
         setFollowups(items);
-      } else if (msg.type === "live_question") {
+      } else if (data.type === "live_question") {
         setLiveQuestion({
-          question: msg.data.question,
-          reason: msg.data.reason
+          question: data.data.question,
+          reason: data.data.reason,
         });
-        // Auto-dismiss after 20 seconds
-        setTimeout(() => {
-          setLiveQuestion(null);
-        }, 20000);
+        setTimeout(() => setLiveQuestion(null), 20000);
       }
     };
 
-    ws.onclose = () => {
-      setIsConnected(false);
+    chrome.runtime.onMessage.addListener(messageListener);
+
+    return () => {
+      chrome.runtime.onMessage.removeListener(messageListener);
+    };
+  }, []); // Register once on mount, never re-register
+
+  // When sessionId is resolved, connect WS and start scraping
+  useEffect(() => {
+    if (!sessionId) return;
+
+    // Tell background to connect backend WebSocket
+    chrome.runtime.sendMessage({ type: "CONNECT_WS", sessionId }).catch(() => {});
+    setIsConnected(true);
+
+    // Tell the active Meet tab to start scraping (in case it hasn't already)
+    chrome.tabs.query({ url: "https://meet.google.com/*" }).then((tabs) => {
+      for (const tab of tabs) {
+        if (tab.id) {
+          chrome.tabs.sendMessage(tab.id, {
+            type: "START_SCRAPING",
+            sessionId,
+          }).catch(() => {});
+        }
+      }
+    });
+
+    timerRef.current = setInterval(() => {
+      setElapsedTime((t) => t + 1);
+    }, 1000);
+
+    return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-
-    wsRef.current = ws;
-  };
+  }, [sessionId]);
 
   const requestFollowup = () => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "request_followup" }));
-    }
+    chrome.runtime.sendMessage({ type: "REQUEST_FOLLOWUP", sessionId }).catch(() => {});
   };
 
   const endInterview = async () => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "end_interview" }));
-    }
+    chrome.runtime.sendMessage({ type: "END_INTERVIEW", sessionId }).catch(() => {});
     
     // Trigger summary generation gracefully in background
     const form = new FormData();
@@ -328,12 +338,22 @@ export default function App() {
               </div>
             )}
 
-            {/* Mini Transcript Summary or toggle */}
-            <div className="mini-transcript">
-              <span className="mt-label">Latest:</span>
-              <p className="mt-text">
-                {transcript.length > 0 ? transcript[transcript.length - 1].text : "Waiting for start..."}
-              </p>
+            {/* Debug Transcript Area */}
+            <div className="mini-transcript" style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '250px', overflowY: 'auto', padding: '12px', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', marginTop: '16px' }}>
+              <span className="mt-label" style={{ fontWeight: 600, color: '#94a3b8', fontSize: '0.75rem', letterSpacing: '0.05em' }}>LATEST TRANSCRIPT:</span>
+              {transcript.length > 0 ? (
+                transcript.slice(-20).map((t, i) => (
+                  <div key={i} style={{ fontSize: '0.85rem', lineHeight: 1.4, color: '#e2e8f0' }}>
+                    <strong style={{ color: t.speaker.includes('Participant') || t.speaker === 'Unknown' ? '#a855f7' : '#3b82f6', marginRight: '6px' }}>
+                      [{t.speaker}]
+                    </strong>
+                    {t.text}
+                  </div>
+                ))
+              ) : (
+                <p className="mt-text" style={{ fontStyle: 'italic', color: '#64748b' }}>Waiting for speech...</p>
+              )}
+              <div ref={transcriptEndRef} />
             </div>
           </div>
         )}

@@ -86,7 +86,7 @@ export default function App() {
               </div>
 
               <div id="report-content" className="report-content">
-                <h2>Interview Report: {selectedSession.candidate || "Candidate"}</h2>
+                <h2>Interview Report: {selectedSession.final_report?.summary?.candidate_name || selectedSession.candidate || "Unknown Candidate"}</h2>
                 <p><strong>Session ID:</strong> {selectedSession.session_id}</p>
                 <p><strong>Date:</strong> {new Date(selectedSession.created_at).toLocaleString()}</p>
                 
@@ -95,8 +95,17 @@ export default function App() {
                     <div className="report-section">
                       <h3>Summary</h3>
                       <p>{selectedSession.final_report.summary?.tldr}</p>
-                      <p><strong>Recommendation:</strong> <span className={`recommendation ${selectedSession.final_report.summary?.overall_recommendation}`}>{selectedSession.final_report.summary?.overall_recommendation?.replace(/_/g, ' ').toUpperCase()}</span></p>
-                      <p><strong>Confidence:</strong> {selectedSession.final_report.summary?.confidence_level}%</p>
+                      
+                      <div className="grid-2" style={{ marginTop: '16px' }}>
+                        <div>
+                          <p><strong>Mood:</strong> <span style={{ textTransform: 'capitalize' }}>{selectedSession.final_report.summary?.overall_mood || "Neutral"}</span></p>
+                          <p><strong>Attitude:</strong> <span style={{ textTransform: 'capitalize' }}>{selectedSession.final_report.summary?.overall_attitude || "Professional"}</span></p>
+                        </div>
+                        <div>
+                          <p><strong>Recommendation:</strong> <span className={`recommendation ${selectedSession.final_report.summary?.overall_recommendation}`}>{selectedSession.final_report.summary?.overall_recommendation?.replace(/_/g, ' ').toUpperCase()}</span></p>
+                          <p><strong>Confidence:</strong> {selectedSession.final_report.summary?.confidence_level}%</p>
+                        </div>
+                      </div>
                     </div>
 
                     <div className="report-section">
@@ -130,9 +139,9 @@ export default function App() {
 
                     <div className="report-section">
                       <h3>Engagement & Communication</h3>
-                      <p><strong>Talk Ratio (Candidate):</strong> {(selectedSession.final_report.engagement?.candidate_talk_ratio * 100).toFixed(0)}%</p>
-                      <p><strong>Enthusiasm:</strong> {selectedSession.final_report.engagement?.enthusiasm_level}</p>
-                      <p><strong>Clarity:</strong> {selectedSession.final_report.engagement?.communication_clarity}</p>
+                      <p><strong>Talk Ratio (Candidate):</strong> {(selectedSession.final_report.engagement?.talk_time_balance?.candidate_percentage || 0).toFixed(0)}%</p>
+                      <p><strong>Enthusiasm:</strong> {selectedSession.final_report.summary?.engagement_analysis?.enthusiasm_level}</p>
+                      <p><strong>Clarity:</strong> {selectedSession.final_report.summary?.engagement_analysis?.communication_clarity}</p>
                     </div>
                   </>
                 ) : (

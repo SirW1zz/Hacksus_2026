@@ -383,52 +383,53 @@ async def websocket_interview(websocket: WebSocket, session_id: str):
     analysis_buffer = []
     last_interaction_time = datetime.now()
     analysis_task = None
+    recent_texts: set = set()  # Dedup: track recently stored texts
 
     async def run_periodic_analysis():
-        """Run analysis every ~45 seconds or if silence is detected to suggest icebreakers."""
-        nonlocal last_interaction_time
+        """Run analysis periodically, purely driven by new transcript data in the database."""
+        last_bias_check = datetime.now()
+        last_analyzed_index = 0
+        last_analysis_time = datetime.now()
+        
         while True:
-            await asyncio.sleep(15) # Check state frequently
-            now = datetime.now()
-            silence_duration = (now - last_interaction_time).total_seconds()
+            await asyncio.sleep(12)  # Check DB for new transcripts periodically
             
-            # Case 1: Long silence (> 25s) - Suggest an icebreaker
-            if silence_duration > 25 and silence_duration < 40: # Only trigger once per silence period
-                print(f"[Analysis] Silence detected ({round(silence_duration)}s). Suggesting icebreaker...")
-                resume_data = active_sessions.get(session_id, {}).get("resume_data", {}) or {}
-                history = db_service.get_transcript_text(session_id)
+            if session_id not in active_sessions or active_sessions[session_id].get("status") != "interviewing":
+                break # Exit if session ended
                 
-                try:
-                    insights = await analyze_live_insights("...silence...", resume_data, history)
-                    await websocket.send_json({
-                        "type": "live_insights",
-                        "data": insights
-                    })
-                    # Bump interaction time so we don't spam icebreakers
-                    last_interaction_time = now - timedelta(seconds=10)
-                except Exception as e:
-                    print(f"[Analysis] Icebreaker error: {e}")
-
-            # Case 2: Gathered enough text - Perform standard insights/warnings update
-            if analysis_buffer and (len(" ".join(analysis_buffer).split()) > 15 or silence_duration > 45):
-                combined = " ".join(analysis_buffer)
-                analysis_buffer.clear()
-                last_interaction_time = now
+            full_transcript = db_service.get_full_transcript(session_id)
+            if len(full_transcript) <= last_analyzed_index:
+                continue # No new text to analyze
+                
+            new_chunks = full_transcript[last_analyzed_index:]
+            new_text = " ".join([c.get("text", "") for c in new_chunks]).strip()
+            
+            now = datetime.now()
+            time_since_analysis = (now - last_analysis_time).total_seconds()
+            word_count = len(new_text.split())
+            
+            # Analyze if we have enough words or it's been a while with some text
+            if word_count >= 10 or (time_since_analysis > 25 and word_count > 0):
+                last_analyzed_index = len(full_transcript)
+                last_analysis_time = now
                 
                 resume_data = active_sessions.get(session_id, {}).get("resume_data", {}) or {}
-                history = db_service.get_transcript_text(session_id)
-
+                
                 try:
-                    # 1. Consolidated Analysis: Insights, Suggestions, Mood, Attitude
-                    analysis_res = await analyze_transcript_chunk_consolidated(combined, resume_data)
+                    # 1. Consolidated Analysis: Insights, Suggestions, Mood, Attitude, etc.
+                    # We pass the new text as the focal point, but it's analyzed against the resume.
+                    analysis_res = await analyze_transcript_chunk_consolidated(new_text, resume_data)
                     
-                    # Broadcast detailed insights
+                    # Normalize suggestions — keep them SHORT and CRISP
                     raw_suggestions = analysis_res.get("suggestions", [])
-                    # Normalize: Gemini may return "question" or "text" key
                     normalized_suggestions = []
                     for s in raw_suggestions:
+                        text = s.get("text") or s.get("question", "")
+                        words = text.split()
+                        if len(words) > 18:
+                            text = " ".join(words[:15]) + "...?"
                         normalized_suggestions.append({
-                            "text": s.get("text") or s.get("question", ""),
+                            "text": text,
                             "reason": s.get("reason", ""),
                             "priority": s.get("priority", "medium"),
                         })
@@ -440,11 +441,12 @@ async def websocket_interview(websocket: WebSocket, session_id: str):
                             "attitude": analysis_res.get("insights", {}).get("attitude", "Interested"),
                             "honesty": analysis_res.get("insights", {}).get("honesty", "Neutral"),
                             "speaker": analysis_res.get("insights", {}).get("speaker", "Both"),
-                            "suggestions": normalized_suggestions
+                            "suggestions": normalized_suggestions,
+                            "competency_updates": analysis_res.get("competency_updates", [])
                         }
                     })
 
-                    # 2. Check Warnings (Vagueness/Contradictions)
+                    # 2. Vagueness / Incomplete answer warnings
                     if analysis_res.get("vagueness", {}).get("is_vague"):
                         await websocket.send_json({
                             "type": "warning",
@@ -452,7 +454,9 @@ async def websocket_interview(websocket: WebSocket, session_id: str):
                             "data": analysis_res["vagueness"],
                         })
                         
-                    if analysis_res.get("contradictions", {}).get("contradictions"):
+                    # 3. Resume contradiction / dishonesty detection
+                    contradictions = analysis_res.get("contradictions", {}).get("contradictions", [])
+                    if contradictions:
                         await websocket.send_json({
                             "type": "warning",
                             "subtype": "contradiction",
@@ -461,6 +465,28 @@ async def websocket_interview(websocket: WebSocket, session_id: str):
 
                 except Exception as e:
                     print(f"[Analysis] Main loop error: {e}")
+
+            # Periodic bias check (~every 90 seconds)
+            bias_elapsed = (now - last_bias_check).total_seconds()
+            if bias_elapsed > 90:
+                last_bias_check = now
+                history = db_service.get_transcript_text(session_id)
+                if history and len(history.split()) > 50:
+                    try:
+                        bias_result = await detect_bias(history)
+                        if bias_result.get("bias_detected"):
+                            for warning in bias_result.get("warnings", []):
+                                await websocket.send_json({
+                                    "type": "warning",
+                                    "subtype": "bias",
+                                    "data": {
+                                        "message": warning.get("message", str(warning)),
+                                        "type": warning.get("type", "unknown"),
+                                        "severity": warning.get("severity", "medium"),
+                                    },
+                                })
+                    except Exception as e:
+                        print(f"[Analysis] Bias check error: {e}")
 
     # Start periodic analysis
     analysis_task = asyncio.create_task(run_periodic_analysis())
@@ -475,6 +501,15 @@ async def websocket_interview(websocket: WebSocket, session_id: str):
                 # Handle CC-scraped text from Google Meet
                 speaker = data.get("speaker", "Unknown")
                 text = data.get("text", "")
+
+                # Dedup: skip if we've already stored this exact text recently
+                dedup_key = f"{speaker}:{text}"
+                if dedup_key in recent_texts:
+                    continue
+                recent_texts.add(dedup_key)
+                # Keep dedup set manageable
+                if len(recent_texts) > 200:
+                    recent_texts.clear()
 
                 # Store transcript chunk
                 db_service.store_transcript_chunk(session_id, {
