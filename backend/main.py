@@ -380,13 +380,23 @@ async def websocket_interview(websocket: WebSocket, session_id: str):
                     analysis_res = await analyze_transcript_chunk_consolidated(combined, resume_data)
                     
                     # Broadcast detailed insights
+                    raw_suggestions = analysis_res.get("suggestions", [])
+                    # Normalize: Gemini may return "question" or "text" key
+                    normalized_suggestions = []
+                    for s in raw_suggestions:
+                        normalized_suggestions.append({
+                            "text": s.get("text") or s.get("question", ""),
+                            "reason": s.get("reason", ""),
+                            "priority": s.get("priority", "medium"),
+                        })
+                    
                     await websocket.send_json({
                         "type": "live_insights",
                         "data": {
                             "mood": analysis_res.get("insights", {}).get("mood", "Conversational"),
                             "attitude": analysis_res.get("insights", {}).get("attitude", "Interested"),
                             "speaker": analysis_res.get("insights", {}).get("speaker", "Both"),
-                            "suggestions": analysis_res.get("suggestions", [])
+                            "suggestions": normalized_suggestions
                         }
                     })
 

@@ -8,7 +8,7 @@ from config import settings
 
 # Configure the Gemini API
 genai.configure(api_key=settings.gemini_api_key)
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel("gemini-2.5-flash")
 
 async def call_gemini(prompt: str) -> str:
     """Call Google Gemini 2.0 Flash."""
