@@ -395,6 +395,7 @@ async def websocket_interview(websocket: WebSocket, session_id: str):
                         "data": {
                             "mood": analysis_res.get("insights", {}).get("mood", "Conversational"),
                             "attitude": analysis_res.get("insights", {}).get("attitude", "Interested"),
+                            "honesty": analysis_res.get("insights", {}).get("honesty", "Neutral"),
                             "speaker": analysis_res.get("insights", {}).get("speaker", "Both"),
                             "suggestions": normalized_suggestions
                         }

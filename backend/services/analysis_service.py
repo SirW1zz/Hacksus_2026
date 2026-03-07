@@ -25,6 +25,7 @@ Return EXACTLY this JSON:
   "speaker": "Candidate | Interviewer | Both",
   "mood": "e.g., Chill, Focused, Tense, Academic, Conversational",
   "attitude": "e.g., Confident, Nervous, Evasive, Enthusiastic",
+  "honesty": "e.g., Authentic, Exaggerating, Scripted, Honest",
   "suggestions": [
     {{
       "type": "icebreaker | follow-up | probe | transition",
@@ -88,6 +89,7 @@ Return EXACTLY this JSON structure:
   "insights": {{
     "mood": "convo mood",
     "attitude": "candidate attitude",
+    "honesty": "candidate honesty",
     "speaker": "who's talking"
   }},
   "suggestions": [

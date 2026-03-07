@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 
 const API_BASE = import.meta.env.WXT_API_BASE || "http://localhost:8000";
 

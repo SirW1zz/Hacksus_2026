@@ -563,7 +563,7 @@ body {
 /* ── Live Status Grid ── */
 .live-status-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 10px;
 }
 
@@ -593,9 +593,10 @@ body {
 .status-card.speaker::after { background: var(--accent); }
 .status-card.mood::after { background: var(--blue); }
 .status-card.attitude::after { background: var(--success); }
+.status-card.honesty::after { background: var(--warning); }
 
 .status-card.speaker {
-  grid-column: span 2;
+  grid-column: span 3;
 }
 
 .sc-label {

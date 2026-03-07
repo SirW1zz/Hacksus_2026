@@ -38,11 +38,13 @@ export default function App() {
   const [insights, setInsights] = useState<{
     mood: string;
     attitude: string;
+    honesty: string;
     speaker: string;
     suggestions: any[];
   }>({
     mood: "Conversational",
     attitude: "Natural",
+    honesty: "Authentic",
     speaker: "Ready",
     suggestions: []
   });
@@ -117,12 +119,13 @@ export default function App() {
         setInsights(prev => ({ ...prev, speaker: msg.speaker }));
 
       } else if (msg.type === "live_insights") {
-        setInsights({
-          mood: msg.data.mood || insights.mood,
-          attitude: msg.data.attitude || insights.attitude,
-          speaker: msg.data.speaker || insights.speaker,
+        setInsights(prev => ({
+          mood: msg.data.mood || prev.mood,
+          attitude: msg.data.attitude || prev.attitude,
+          honesty: msg.data.honesty || prev.honesty,
+          speaker: msg.data.speaker || prev.speaker,
           suggestions: msg.data.suggestions || []
-        });
+        }));
 
         // If there are competency updates, apply them
         if (msg.data.competency_updates) {
@@ -275,6 +278,10 @@ export default function App() {
               <div className="status-card attitude">
                 <span className="sc-label">Candidate Attitude</span>
                 <span className="sc-val">{insights.attitude}</span>
+              </div>
+              <div className="status-card honesty">
+                <span className="sc-label">Candidate Honesty</span>
+                <span className="sc-val">{insights.honesty}</span>
               </div>
             </div>
 
