@@ -13,6 +13,7 @@ class Settings(BaseSettings):
         extra="ignore"
     )
 
+    deepseek_api_key: str = ""
     gemini_api_key: str = ""
     deepgram_api_key: str = ""
     mongodb_uri: str = ""

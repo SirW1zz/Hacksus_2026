@@ -1,0 +1,115 @@
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background-color: #f4f6f8;
+  color: #333;
+}
+
+.dashboard-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.dashboard-header {
+  text-align: center;
+  margin-bottom: 30px;
+}
+
+.dashboard-layout {
+  display: flex;
+  gap: 20px;
+}
+
+.session-list {
+  flex: 1;
+  background: white;
+  padding: 15px;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.session-card {
+  padding: 15px;
+  border: 1px solid #eee;
+  border-radius: 6px;
+  margin-bottom: 15px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.session-card:hover {
+  border-color: #007bff;
+}
+
+.session-card.active {
+  background-color: #e6f2ff;
+  border-color: #007bff;
+}
+
+.session-detail {
+  flex: 2;
+  background: white;
+  padding: 30px;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  min-height: 80vh;
+}
+
+.report-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 20px;
+}
+
+.btn {
+  padding: 10px 15px;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  background-color: #007bff;
+  color: white;
+  font-weight: bold;
+}
+
+.report-content h2 {
+  margin-top: 0;
+  border-bottom: 2px solid #eee;
+  padding-bottom: 10px;
+}
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 12px;
+  font-size: 0.8rem;
+  background-color: #ffc107;
+}
+.status-badge.summarized {
+  background-color: #28a745;
+  color: white;
+}
+
+.recommendation.strong_hire, .recommendation.hire { color: #28a745; font-weight: bold; }
+.recommendation.no_hire, .recommendation.strong_no_hire { color: #dc3545; font-weight: bold; }
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  .dashboard-layout {
+    display: block;
+  }
+  .session-detail {
+    box-shadow: none;
+    padding: 0;
+  }
+}

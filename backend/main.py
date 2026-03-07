@@ -20,12 +20,14 @@ from services.gemini_service import (
     analyze_response,
     generate_followup,
     generate_summary,
+    generate_proactive_question,
 )
 from services.analysis_service import (
     detect_vague_answers,
     detect_contradictions,
     detect_bias,
     calculate_engagement,
+    analyze_transcript_chunk_consolidated,
 )
 from services.deepgram_service import DeepgramTranscriber
 
@@ -99,6 +101,12 @@ async def get_session(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return session
+
+
+@app.get("/sessions")
+async def get_all_sessions():
+    """Get all past sessions."""
+    return db_service.get_all_sessions()
 
 
 # ─────────────────────── Resume & JD Upload ───────────────────────
@@ -263,11 +271,16 @@ async def generate_summary_endpoint(session_id: str = Form(...)):
     # Generate the final summary
     summary = await generate_summary(full_transcript, resume_data)
 
-    return {
+    final_report = {
         "summary": summary,
         "engagement": engagement,
         "bias_report": bias_report,
     }
+    
+    # Store in database
+    db_service.update_session(session_id, {"final_report": final_report, "status": "summarized"})
+
+    return final_report
 
 
 # ─────────────────────── Interview Guide ───────────────────────
@@ -327,36 +340,22 @@ async def websocket_interview(websocket: WebSocket, session_id: str):
     analysis_task = None
 
     async def run_periodic_analysis():
-        """Run analysis every ~30 seconds on accumulated buffer."""
+        """Run analysis every ~60 seconds on accumulated buffer to save Gemini tokens."""
         while True:
-            await asyncio.sleep(30)
+            await asyncio.sleep(60)
             if analysis_buffer:
                 combined = " ".join(analysis_buffer)
-                analysis_buffer.clear()
+                
+                # Only analyze if there is actually substance (e.g., > 10 words)
+                if len(combined.split()) > 10:
+                    analysis_buffer.clear()
+                else:
+                    continue
 
                 resume_data = active_sessions.get(session_id, {}).get("resume_data", {}) or {}
 
                 try:
-                    # Detect vagueness
-                    vagueness = await detect_vague_answers(combined)
-                    if vagueness.get("is_vague"):
-                        await websocket.send_json({
-                            "type": "warning",
-                            "subtype": "vague_answer",
-                            "data": vagueness,
-                        })
-
-                    # Detect contradictions
-                    if resume_data:
-                        contradictions = await detect_contradictions(combined, resume_data)
-                        if contradictions.get("contradictions"):
-                            await websocket.send_json({
-                                "type": "warning",
-                                "subtype": "contradiction",
-                                "data": contradictions,
-                            })
-
-                    # Check bias
+                    # 1. Check Bias (Separate because it checks the entire history)
                     full_transcript = db_service.get_transcript_text(session_id)
                     bias = await detect_bias(full_transcript)
                     if bias.get("bias_detected"):
@@ -365,6 +364,36 @@ async def websocket_interview(websocket: WebSocket, session_id: str):
                             "subtype": "bias",
                             "data": bias,
                         })
+
+                    # 2. Consolidated check: Vagueness, Contradictions, and Proactive Question (1 Gemini call)
+                    if resume_data:
+                        analysis_res = await analyze_transcript_chunk_consolidated(combined, resume_data)
+                        
+                        # Vagueness
+                        vagueness = analysis_res.get("vagueness", {})
+                        if vagueness.get("is_vague"):
+                            await websocket.send_json({
+                                "type": "warning",
+                                "subtype": "vague_answer",
+                                "data": vagueness,
+                            })
+                            
+                        # Contradictions
+                        contradictions = analysis_res.get("contradictions", {})
+                        if contradictions.get("contradictions"):
+                            await websocket.send_json({
+                                "type": "warning",
+                                "subtype": "contradiction",
+                                "data": contradictions,
+                            })
+                            
+                        # Proactive questions based on interesting data
+                        proactive = analysis_res.get("proactive_question", {})
+                        if proactive.get("is_important") and proactive.get("question"):
+                            await websocket.send_json({
+                                "type": "live_question",
+                                "data": proactive,
+                            })
 
                 except Exception as e:
                     print(f"[Analysis] Error: {e}")

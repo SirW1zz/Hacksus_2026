@@ -74,6 +74,12 @@ def get_session(session_id: str) -> Optional[dict]:
     return sessions_col.find_one({"session_id": session_id}, {"_id": 0})
 
 
+def get_all_sessions() -> list:
+    """Retrieve all sessions ordered by creation time."""
+    docs = sessions_col.find({}, {"_id": 0}).sort("created_at", -1)
+    return list(docs)
+
+
 # ──────────────── Transcript Operations ────────────────
 
 def store_transcript_chunk(session_id: str, chunk: dict) -> str:

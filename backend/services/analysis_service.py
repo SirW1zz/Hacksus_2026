@@ -4,8 +4,50 @@ bias warnings, and engagement analytics.
 """
 
 import json
-from services.gemini_service import model
+from services.gemini_service import call_gemini
 
+
+async def analyze_transcript_chunk_consolidated(text: str, resume_data: dict) -> dict:
+    """Consolidated endpoint to flag vagueness, contradictions, and generate questions in ONE Gemini call."""
+    prompt = f"""You are an advanced interview copilot AI. Analyze the candidate's latest verbal statement and compare it to their resume.
+
+VERBAL STATEMENT:
+{text}
+
+RESUME DATA:
+{json.dumps(resume_data, indent=2, default=str)[:3000]}
+
+Perform three tasks and return one comprehensive JSON:
+1. Vagueness check: Is the answer vague or deflecting?
+2. Contradiction check: Does the verbal claim contradict the resume?
+3. Proactive question: If they said something highly interesting or questionable, formulate ONE sharp follow-up. Do not force an unimportant question.
+
+Return EXACTLY this JSON structure:
+{{
+  "vagueness": {{
+    "is_vague": true/false,
+    "vague_phrases": [
+      {{"phrase": "...", "issue": "..."}}
+    ]
+  }},
+  "contradictions": {{
+    "contradictions": [
+      {{"verbal_claim": "what they said", "resume_fact": "what resume shows", "suggested_probe": "question to clarify"}}
+    ]
+  }},
+  "proactive_question": {{
+    "is_important": true/false,
+    "question": "The question, or null",
+    "reason": "Why to ask it, or null"
+  }}
+}}"""
+
+    text_resp = await call_gemini(prompt)
+
+    try:
+        return json.loads(text_resp)
+    except Exception:
+        return {"vagueness": {}, "contradictions": {}, "proactive_question": {}}
 
 async def detect_vague_answers(text: str) -> dict:
     """Flag non-specific or evasive answers in a transcript chunk."""
@@ -26,13 +68,7 @@ Return JSON:
   ]
 }}"""
 
-    response = await model.generate_content_async(prompt)
-    text_resp = response.text.strip()
-    if text_resp.startswith("```"):
-        text_resp = text_resp.split("\n", 1)[1]
-        if text_resp.endswith("```"):
-            text_resp = text_resp[:-3]
-        text_resp = text_resp.strip()
+    text_resp = await call_gemini(prompt)
 
     try:
         return json.loads(text_resp)
@@ -67,13 +103,7 @@ Return JSON:
   ]
 }}"""
 
-    response = await model.generate_content_async(prompt)
-    text_resp = response.text.strip()
-    if text_resp.startswith("```"):
-        text_resp = text_resp.split("\n", 1)[1]
-        if text_resp.endswith("```"):
-            text_resp = text_resp[:-3]
-        text_resp = text_resp.strip()
+    text_resp = await call_gemini(prompt)
 
     try:
         return json.loads(text_resp)
@@ -113,13 +143,7 @@ Return JSON:
   }}
 }}"""
 
-    response = await model.generate_content_async(prompt)
-    text_resp = response.text.strip()
-    if text_resp.startswith("```"):
-        text_resp = text_resp.split("\n", 1)[1]
-        if text_resp.endswith("```"):
-            text_resp = text_resp[:-3]
-        text_resp = text_resp.strip()
+    text_resp = await call_gemini(prompt)
 
     try:
         return json.loads(text_resp)
