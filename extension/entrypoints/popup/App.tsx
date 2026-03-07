@@ -54,8 +54,32 @@ export default function App() {
     setLoading(false);
   };
 
+  // Open side panel directly to preserve user gesture passing
+  const openSidePanel = async () => {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.id && tab.url?.includes("meet.google.com")) {
+        await chrome.sidePanel.setOptions({ tabId: tab.id, path: 'sidepanel.html', enabled: true });
+        await chrome.sidePanel.open({ tabId: tab.id });
+      } else {
+        const win = await chrome.windows.getCurrent();
+        if (win.id) {
+          await chrome.sidePanel.setOptions({ path: 'sidepanel.html', enabled: true });
+          await chrome.sidePanel.open({ windowId: win.id });
+        }
+      }
+    } catch (err) {
+      console.error("Popup open sidepanel error:", err);
+      // Fallback: send message to background
+      chrome.runtime.sendMessage({ type: "OPEN_SIDEPANEL" });
+    }
+  };
+
   // Start Developer Mode (skip resume/JD upload)
   const startDevMode = async () => {
+    // OPEN SIDE PANEL IMMEDIATELY to preserve the user's click gesture (don't block with await fetch!)
+    openSidePanel().catch(console.error);
+
     setLoading(true);
     setError("");
     try {
@@ -79,9 +103,6 @@ export default function App() {
       setSessionId(newSessionId);
       await chrome.storage.local.set({ sessionId: newSessionId, isLive: true });
       setStatus("live");
-      
-      // Request side panel to open immediately
-      chrome.runtime.sendMessage({ type: "OPEN_SIDEPANEL" });
       
       // If we are already on a meet tab, tell it to start scraping
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -169,9 +190,8 @@ export default function App() {
 
   // Start live interview (open side panel + notify content script)
   const goLive = async () => {
+    openSidePanel().catch(console.error);
     await chrome.storage.local.set({ sessionId, isLive: true });
-    // Tell background to open side panel
-    chrome.runtime.sendMessage({ type: "OPEN_SIDEPANEL" });
     // Tell content script to start scraping
     const [tab] = await chrome.tabs.query({
       active: true,
@@ -345,10 +365,9 @@ export default function App() {
                     className="btn secondary" 
                     style={{ width: "100%", background: "#4285f4", color: "white", marginBottom: "10px" }}
                     onClick={async () => {
+                      openSidePanel().catch(console.error);
                       await chrome.storage.local.set({ sessionId, isLive: true });
                       setStatus("live");
-                      // Request side panel to open
-                      chrome.runtime.sendMessage({ type: "OPEN_SIDEPANEL" });
                       chrome.tabs.create({ url: "https://meet.google.com/new" });
                     }}
                   >
