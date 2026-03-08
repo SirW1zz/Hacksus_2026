@@ -1,3 +1,10 @@
+<img width="1920" height="1080" alt="Screenshot (174)" src="https://github.com/user-attachments/assets/83046af0-fa5b-4916-8fc8-db207e315cf0" />
+<img width="1920" height="1080" alt="Screenshot (171)" src="https://github.com/user-attachments/assets/b7ea5527-7099-4f67-9eee-80cde6aa8c64" />
+<img width="1920" height="1080" alt="Screenshot (170)" src="https://github.com/user-attachments/assets/12a357ed-a661-4d25-9080-046fa1e55b12" />
+<img width="1920" height="1080" alt="Screenshot (167)" src="https://github.com/user-attachments/assets/f8ce736a-2af7-41ac-aaa9-727d8a2103a4" />
+<img width="1920" height="1080" alt="Screenshot (165)" src="https://github.com/user-attachments/assets/2bb0ff93-628f-49ce-8ae5-23d44208fed8" />
+<img width="1920" height="1080" alt="Screenshot (162)" src="https://github.com/user-attachments/assets/4e2c13cb-4690-4481-9f2c-6f589938fcb8" />
+<img width="1920" height="1080" alt="Screenshot (150)" src="https://github.com/user-attachments/assets/fdfb0fd9-1a13-4d6d-b1dd-80905cc74949" />
 # SHORTLIST.ai
 
 The **Interview Intelligence Agent** is an AI-powered, real-time interview copilot that integrates directly into **Google Meet**. It provides real-time transcription, competency analysis, AI-suggested follow-up questions, and bias alerts — all within a native side panel.
