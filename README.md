@@ -1,4 +1,4 @@
-# Interview Intelligence Agent 🧠
+# SHORTLIST.ai
 
 The **Interview Intelligence Agent** is an AI-powered, real-time interview copilot that integrates directly into **Google Meet**. It provides real-time transcription, competency analysis, AI-suggested follow-up questions, and bias alerts — all within a native side panel.
 
