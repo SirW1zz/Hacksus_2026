@@ -22,16 +22,24 @@ export default defineContentScript({
     let observer: MutationObserver | null = null;
     let pollInterval: ReturnType<typeof setInterval> | null = null;
 
-    // Dedup: track recently sent captions
-    const sentTexts = new Map<string, number>(); // key -> timestamp
+    // ─── Dedup & Element Tracking ───
+    // Google Meet CC actively updates caption text in-place. 
+    // We track each element to only emit the final version of each caption.
+    const elementTexts = new WeakMap<HTMLElement, string>();  // element → last seen text
+    const elementTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();  // debounce timers
+    const sentTexts: Array<{ speaker: string; text: string; time: number }> = [];
+    const MAX_SENT_HISTORY = 50;
+    const DEDUP_WINDOW_MS = 8000;
+    const EMIT_DEBOUNCE_MS = 800;   // FASTER: wait less for CC to finish before emitting
+    let lastActivityTime = Date.now(); // watchdog for responsiveness
 
-    // Cleanup old dedup entries periodically
+    // Clean old dedup entries periodically
     setInterval(() => {
-      const cutoff = Date.now() - 10000;
-      for (const [key, time] of sentTexts) {
-        if (time < cutoff) sentTexts.delete(key);
+      const cutoff = Date.now() - DEDUP_WINDOW_MS;
+      while (sentTexts.length > 0 && sentTexts[0].time < cutoff) {
+        sentTexts.shift();
       }
-    }, 15000);
+    }, 10000);
 
     // ─── Caption Detection ───
 
@@ -46,8 +54,7 @@ export default defineContentScript({
         return null;
       }
 
-      // Try to find the speaker name. Google Meet uses a nested structure:
-      // The caption container has a speaker name element and caption text.
+      // Try to find the speaker name
       let speaker = "Candidate";
 
       // Method 1: Look for speaker name in child elements
@@ -61,7 +68,7 @@ export default defineContentScript({
 
       // Method 2: Check for image alt text (speaker avatar)
       if (speaker === "Candidate") {
-        const img = node.querySelector('img[alt]');
+        const img = node.parentElement?.querySelector('img[alt]');
         if (img) {
           const alt = (img as HTMLImageElement).alt?.trim();
           if (alt && alt.length > 0 && alt.length < 50) {
@@ -70,12 +77,32 @@ export default defineContentScript({
         }
       }
 
+      // Method 3: TREE TRAVERSAL FALLBACK (Robustness)
+      // If we still don't have a name, look at siblings or ancestor siblings
+      // Google Meet often places the name in a parallel div structure.
+      if (speaker === "Candidate") {
+        let current: HTMLElement | null = node;
+        let depth = 0;
+        while (current && depth < 4) {
+          const sibling = current.previousElementSibling;
+          if (sibling) {
+            const possibleName = sibling.textContent?.trim();
+            // Names are usually short and don't look like timestamps (e.g. "12:34 PM")
+            if (possibleName && possibleName.length > 1 && possibleName.length < 40 && !/\d{1,2}:\d{2}/.test(possibleName)) {
+              speaker = possibleName.toLowerCase() === "you" ? "Interviewer" : possibleName;
+              break;
+            }
+          }
+          current = current.parentElement;
+          depth++;
+        }
+      }
+
       // Extract just the caption text (remove speaker name from beginning)
       let captionText = fullText;
       if (speaker !== "Candidate" && speaker !== "Interviewer" && captionText.startsWith(speaker)) {
         captionText = captionText.substring(speaker.length).trim();
       }
-      // If speaker is "You" in the original, the fullText might start with "You"
       if (captionText.startsWith("You ") || captionText.startsWith("You\n")) {
         speaker = "Interviewer";
         captionText = captionText.substring(3).trim();
@@ -86,25 +113,69 @@ export default defineContentScript({
       return { speaker, text: captionText };
     }
 
-    function sendCaption(speaker: string, text: string) {
-      const dedupKey = `${speaker}:${text}`;
-      const now = Date.now();
+    /**
+     * Check if text is a near-duplicate of a recently sent entry.
+     * Returns true if it's a duplicate that should be skipped.
+     */
+    function isDuplicate(speaker: string, text: string): boolean {
+      const normalizedNew = text.toLowerCase().trim();
+      for (let i = sentTexts.length - 1; i >= 0; i--) {
+        const entry = sentTexts[i];
+        if (Date.now() - entry.time > DEDUP_WINDOW_MS) break;
+        if (entry.speaker !== speaker) continue;
 
-      // Don't send exact same text within 3 seconds
-      if (sentTexts.has(dedupKey) && now - (sentTexts.get(dedupKey) || 0) < 3000) {
-        return;
+        const normalizedOld = entry.text.toLowerCase().trim();
+        // Exact match
+        if (normalizedNew === normalizedOld) return true;
+        // New text is a substring of old (old was more complete)
+        if (normalizedOld.includes(normalizedNew)) return true;
+        // Old text is a prefix of new — this is an UPDATE, replace it
+        if (normalizedNew.startsWith(normalizedOld) || normalizedNew.includes(normalizedOld)) {
+          // Replace old with the updated (longer) version
+          entry.text = text;
+          entry.time = Date.now();
+          return true; // Don't re-send, the backend already has a version
+        }
       }
+      return false;
+    }
 
-      sentTexts.set(dedupKey, now);
+    function sendCaption(speaker: string, text: string) {
+      if (isDuplicate(speaker, text)) return;
+
+      sentTexts.push({ speaker, text, time: Date.now() });
+      if (sentTexts.length > MAX_SENT_HISTORY) sentTexts.shift();
 
       console.log(`[Interview Intel] 📝 [${speaker}]: ${text.substring(0, 80)}${text.length > 80 ? '...' : ''}`);
 
+      lastActivityTime = Date.now();
       chrome.runtime.sendMessage({
         type: "CC_TEXT",
         sessionId,
         speaker,
         text,
       }).catch(() => {});
+    }
+
+    /**
+     * Debounced caption emit: tracks element text via WeakMap and only sends
+     * after the element hasn't changed for EMIT_DEBOUNCE_MS.
+     */
+    function debouncedEmit(element: HTMLElement, speaker: string, text: string) {
+      const previousText = elementTexts.get(element);
+      if (previousText === text) return; // No change in this element
+      elementTexts.set(element, text);
+
+      // Clear existing timer for this element
+      const existingTimer = elementTimers.get(element);
+      if (existingTimer) clearTimeout(existingTimer);
+
+      // Set a debounce timer — only emit after CC stops updating this element
+      const timer = setTimeout(() => {
+        elementTimers.delete(element);
+        sendCaption(speaker, text);
+      }, EMIT_DEBOUNCE_MS);
+      elementTimers.set(element, timer);
     }
 
     // ─── MutationObserver (Primary Method) ───
@@ -141,6 +212,7 @@ export default defineContentScript({
 
     function processNode(node: Node) {
       if (!(node instanceof HTMLElement)) return;
+      lastActivityTime = Date.now(); // We saw something in the DOM
 
       // Look for caption containers using multiple selector strategies
       // Strategy 1: Known jsname attributes
@@ -161,10 +233,19 @@ export default defineContentScript({
         for (const container of captionContainers) {
           const result = getCaptionText(container);
           if (result) {
-            sendCaption(result.speaker, result.text);
+            debouncedEmit(container as HTMLElement, result.speaker, result.text);
           }
         }
         return; // Found via known selectors, done
+      }
+
+      // Strategy 1.5: Broad Aria-label search
+      const ariaCaptions = node.querySelectorAll('[aria-label*="caption" i]');
+      if (ariaCaptions.length > 0) {
+        for (const ac of ariaCaptions) {
+           const result = getCaptionText(ac);
+           if (result) debouncedEmit(ac as HTMLElement, result.speaker, result.text);
+        }
       }
 
       // Strategy 2: Heuristic — look for any small div with text that appeared
@@ -183,7 +264,7 @@ export default defineContentScript({
             // This element is in the lower 40% of the screen (caption area)
             const result = getCaptionText(node);
             if (result) {
-              sendCaption(result.speaker, result.text);
+              debouncedEmit(node, result.speaker, result.text);
             }
           }
         }
@@ -221,7 +302,7 @@ export default defineContentScript({
           for (const el of elements) {
             const result = getCaptionText(el);
             if (result) {
-              sendCaption(result.speaker, result.text);
+              debouncedEmit(el as HTMLElement, result.speaker, result.text);
             }
           }
         }
@@ -235,6 +316,22 @@ export default defineContentScript({
       }
     }
 
+    // ─── Watchdog (Fail-proof) ───
+    let watchdogInterval: ReturnType<typeof setInterval> | null = null;
+    function startWatchdog() {
+      if (watchdogInterval) return;
+      watchdogInterval = setInterval(() => {
+        if (!isActive) return;
+        const inactiveDuration = Date.now() - lastActivityTime;
+        if (inactiveDuration > 45000) { // 45 seconds of silence/no-DOM-changes
+           console.warn("[Interview Intel] ⚠️ Watchdog: Transcription seems stuck. Restarting...");
+           stopObserver();
+           startObserver();
+           lastActivityTime = Date.now();
+        }
+      }, 10000);
+    }
+
     // ─── Start/Stop ───
 
     function start() {
@@ -243,6 +340,7 @@ export default defineContentScript({
       console.log("[Interview Intel] ▶ Starting transcript capture (Observer + Polling)...");
       startObserver();
       startPolling();
+      startWatchdog();
 
       // Also try tab capture via background (bonus Deepgram quality)
       chrome.runtime.sendMessage({
@@ -255,8 +353,12 @@ export default defineContentScript({
       isActive = false;
       stopObserver();
       stopPolling();
+      if (watchdogInterval) { clearInterval(watchdogInterval); watchdogInterval = null; }
       chrome.runtime.sendMessage({ type: "STOP_TAB_CAPTURE" }).catch(() => {});
-      sentTexts.clear();
+      sentTexts.length = 0;
+      // Clear debounce timers
+      for (const timer of elementTimers.values()) clearTimeout(timer);
+      elementTimers.clear();
       console.log("[Interview Intel] ⏹ Transcript capture stopped");
     }
 
@@ -271,7 +373,7 @@ export default defineContentScript({
         stop();
         sendResponse({ status: "stopped" });
       } else if (msg.type === "PING") {
-        sendResponse({ status: "alive", scraping: isActive });
+        sendResponse({ type: "PONG", isActive });
       }
     });
 
@@ -287,14 +389,24 @@ export default defineContentScript({
     // ─── Auto-enable captions ───
     // Wait for the page to fully load, then try to enable captions
     const tryEnableCaptions = () => {
-      // Look for the CC button by aria-label
-      const ccButtons = document.querySelectorAll('button[aria-label*="caption" i], button[aria-label*="subtitle" i]');
-      for (const btn of ccButtons) {
-        const pressed = btn.getAttribute("aria-pressed");
-        if (pressed === "false") {
-          console.log("[Interview Intel] 🎬 Auto-enabling captions...");
-          (btn as HTMLElement).click();
-          return true;
+      const buttons = document.querySelectorAll('button');
+      for (const btn of Array.from(buttons)) {
+        const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+        const dataTooltip = (btn.getAttribute('data-tooltip') || '').toLowerCase();
+        
+        const isCaptionsBtn = ariaLabel.includes('caption') || ariaLabel.includes('subtitle') || 
+                              dataTooltip.includes('caption') || dataTooltip.includes('subtitle');
+        
+        if (isCaptionsBtn) {
+          // Check if it's currently OFF.
+          if (ariaLabel.includes('turn on') || dataTooltip.includes('turn on') || btn.getAttribute('aria-pressed') === 'false') {
+             console.log("[Interview Intel] 🎬 Auto-enabling captions...");
+             btn.click();
+             return true;
+          } else if (ariaLabel.includes('turn off') || dataTooltip.includes('turn off') || btn.getAttribute('aria-pressed') === 'true') {
+             console.log("[Interview Intel] 🎬 Captions are already on.");
+             return true; // CC is already enabled
+          }
         }
       }
       return false;

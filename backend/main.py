@@ -187,19 +187,26 @@ async def upload_jd(
             resume_data = resume_doc.get("parsed_data")
             active_sessions[session_id]["resume_data"] = resume_data
 
-    # If resume found, auto-generate scorecard + guide
+    # If resume found, auto-generate scorecard + guide IN PARALLEL for speed
     if resume_data:
 
         try:
-            scorecard = await generate_competency_scorecard(resume_data, parsed_jd)
-            active_sessions[session_id]["scorecard"] = scorecard
-
-            guide = await generate_interview_guide(
+            # Run both in parallel — cuts ~50% off the wait time
+            scorecard_task = generate_competency_scorecard(resume_data, parsed_jd)
+            guide_task = generate_interview_guide(
                 resume_data.get("raw_text", json.dumps(resume_data)),
                 jd_text,
             )
+            scorecard, guide = await asyncio.gather(scorecard_task, guide_task)
+
+            active_sessions[session_id]["scorecard"] = scorecard
             active_sessions[session_id]["interview_guide"] = guide
-            db_service.update_session(session_id, {"interview_guide": guide})
+            
+            # Store initial scorecard + guide in DB for dashboard comparison
+            db_service.update_session(session_id, {
+                "interview_guide": guide,
+                "initial_scorecard": scorecard,
+            })
 
             return {
                 "session_id": session_id,
@@ -383,34 +390,41 @@ async def websocket_interview(websocket: WebSocket, session_id: str):
     analysis_buffer = []
     last_interaction_time = datetime.now()
     analysis_task = None
-    recent_texts: set = set()  # Dedup: track recently stored texts
+    recent_texts: list = []  # Dedup: track recently stored texts as [{speaker, text, time}]
 
     async def run_periodic_analysis():
         """Run analysis periodically, purely driven by new transcript data in the database."""
         last_bias_check = datetime.now()
         last_analyzed_index = 0
         last_analysis_time = datetime.now()
+        last_processed_time = datetime.now(timezone.utc)
         
         while True:
-            await asyncio.sleep(12)  # Check DB for new transcripts periodically
+            await asyncio.sleep(5)  # Fast polling for near-instant dynamic questions
             
             if session_id not in active_sessions or active_sessions[session_id].get("status") != "interviewing":
                 break # Exit if session ended
                 
-            full_transcript = db_service.get_full_transcript(session_id)
-            if len(full_transcript) <= last_analyzed_index:
+            # OPTIMIZATION: Only fetch new transcript chunks since last check
+            new_chunks = db_service.get_transcript_since(session_id, last_processed_time)
+            if not new_chunks:
                 continue # No new text to analyze
                 
-            new_chunks = full_transcript[last_analyzed_index:]
+            # Update markers
+            if new_chunks:
+                last_processed_time = new_chunks[-1].get("created_at") or datetime.now(timezone.utc)
+                if isinstance(last_processed_time, str):
+                   try: last_processed_time = datetime.fromisoformat(last_processed_time.replace("Z", "+00:00"))
+                   except: last_processed_time = datetime.now(timezone.utc)
+
             new_text = " ".join([c.get("text", "") for c in new_chunks]).strip()
             
             now = datetime.now()
             time_since_analysis = (now - last_analysis_time).total_seconds()
             word_count = len(new_text.split())
             
-            # Analyze if we have enough words or it's been a while with some text
-            if word_count >= 10 or (time_since_analysis > 25 and word_count > 0):
-                last_analyzed_index = len(full_transcript)
+            # Analyze fast: lower thresholds for quicker question generation
+            if word_count >= 5 or (time_since_analysis > 15 and word_count > 0):
                 last_analysis_time = now
                 
                 resume_data = active_sessions.get(session_id, {}).get("resume_data", {}) or {}
@@ -426,8 +440,8 @@ async def websocket_interview(websocket: WebSocket, session_id: str):
                     for s in raw_suggestions:
                         text = s.get("text") or s.get("question", "")
                         words = text.split()
-                        if len(words) > 18:
-                            text = " ".join(words[:15]) + "...?"
+                        if len(words) > 12:
+                            text = " ".join(words[:10]) + "...?"
                         normalized_suggestions.append({
                             "text": text,
                             "reason": s.get("reason", ""),
@@ -502,14 +516,37 @@ async def websocket_interview(websocket: WebSocket, session_id: str):
                 speaker = data.get("speaker", "Unknown")
                 text = data.get("text", "")
 
-                # Dedup: skip if we've already stored this exact text recently
-                dedup_key = f"{speaker}:{text}"
-                if dedup_key in recent_texts:
+                # ── Substring-aware dedup ──
+                # Clean old entries
+                cutoff = datetime.now().timestamp() - 10
+                recent_texts[:] = [r for r in recent_texts if r["time"] > cutoff]
+                
+                normalized_new = text.lower().strip()
+                is_dup = False
+                for entry in recent_texts:
+                    if entry["speaker"] != speaker:
+                        continue
+                    normalized_old = entry["text"].lower().strip()
+                    if normalized_new == normalized_old:
+                        is_dup = True
+                        break
+                    if normalized_old in normalized_new:
+                        # Old is prefix/subset of new — treat new as update
+                        entry["text"] = text
+                        entry["time"] = datetime.now().timestamp()
+                        is_dup = True
+                        break
+                    if normalized_new in normalized_old:
+                        # New is subset of old — old was more complete, skip
+                        is_dup = True
+                        break
+                
+                if is_dup:
                     continue
-                recent_texts.add(dedup_key)
-                # Keep dedup set manageable
-                if len(recent_texts) > 200:
-                    recent_texts.clear()
+                
+                recent_texts.append({"speaker": speaker, "text": text, "time": datetime.now().timestamp()})
+                if len(recent_texts) > 100:
+                    recent_texts = recent_texts[-50:]
 
                 # Store transcript chunk
                 db_service.store_transcript_chunk(session_id, {
@@ -547,10 +584,39 @@ async def websocket_interview(websocket: WebSocket, session_id: str):
                 })
 
             elif msg_type == "end_interview":
-                # End the interview
+                # End the interview & auto-generate summary
                 db_service.update_session(session_id, {"status": "completed"})
                 active_sessions[session_id]["status"] = "completed"
                 await websocket.send_json({"type": "session_ended"})
+                
+                # Auto-generate summary in background so dashboard picks it up fast
+                async def _auto_summary():
+                    try:
+                        full_transcript = db_service.get_transcript_text(session_id)
+                        if not full_transcript or len(full_transcript.split()) < 5:
+                            return
+                        resume_data_local = active_sessions.get(session_id, {}).get("resume_data", {}) or {}
+                        transcript_chunks = db_service.get_full_transcript(session_id)
+                        engagement = await calculate_engagement(transcript_chunks)
+                        bias_report = await detect_bias(full_transcript)
+                        summary = await generate_summary(full_transcript, resume_data_local)
+                        
+                        # Get initial scorecard for comparison
+                        session_doc = db_service.get_session(session_id)
+                        initial_scorecard = session_doc.get("initial_scorecard") if session_doc else None
+                        
+                        final_report = {
+                            "summary": summary,
+                            "engagement": engagement,
+                            "bias_report": bias_report,
+                            "initial_scorecard": initial_scorecard,
+                        }
+                        db_service.update_session(session_id, {"final_report": final_report, "status": "summarized"})
+                        print(f"[Auto-Summary] Report generated for session {session_id}")
+                    except Exception as e:
+                        print(f"[Auto-Summary] Error generating summary for {session_id}: {e}")
+                
+                asyncio.create_task(_auto_summary())
                 break
 
     except WebSocketDisconnect:
@@ -562,6 +628,93 @@ async def websocket_interview(websocket: WebSocket, session_id: str):
             analysis_task.cancel()
         if session_id in active_sessions:
             active_sessions[session_id]["status"] = "disconnected"
+
+
+# ─────────────────────── Candidate Grouping & Notes ───────────────────────
+
+@app.get("/candidates")
+async def get_candidates():
+    """Get all candidates grouped by phone number (unique identifier).
+    If no phone, falls back to candidate name."""
+    sessions = db_service.get_all_sessions()
+    candidates: dict = {}
+    
+    for s in sessions:
+        # Extract phone from resume data
+        resume_doc = db_service.get_resume(s.get("session_id", ""))
+        phone = None
+        name = s.get("candidate", "Unknown Candidate")
+        
+        if resume_doc and resume_doc.get("parsed_data"):
+            parsed = resume_doc["parsed_data"]
+            phone = parsed.get("phone", "").strip() if parsed.get("phone") else None
+            if parsed.get("name"):
+                name = parsed["name"]
+        
+        # Also check final report for candidate name
+        if s.get("final_report", {}).get("summary", {}).get("candidate_name"):
+            report_name = s["final_report"]["summary"]["candidate_name"]
+            if report_name and report_name != "Unknown":
+                name = report_name
+        
+        # Group key: phone if available, otherwise name
+        group_key = phone if phone else name
+        
+        if group_key not in candidates:
+            candidates[group_key] = {
+                "name": name,
+                "phone": phone,
+                "sessions": [],
+                "notes": db_service.get_notes(group_key),
+            }
+        
+        candidates[group_key]["sessions"].append({
+            "session_id": s.get("session_id"),
+            "status": s.get("status"),
+            "created_at": s.get("created_at"),
+            "final_report": s.get("final_report"),
+            "initial_scorecard": s.get("initial_scorecard"),
+        })
+        # Use the most complete name
+        if name and name != "Unknown Candidate" and name != "Unknown":
+            candidates[group_key]["name"] = name
+    
+    return list(candidates.values())
+
+
+@app.post("/notes")
+async def save_note(
+    candidate_key: str = Form(...),
+    note_text: str = Form(...),
+):
+    """Save a note for a candidate (keyed by phone or name)."""
+    note_id = db_service.save_note(candidate_key, note_text)
+    return {"status": "saved", "note_id": note_id}
+
+
+@app.get("/notes/{candidate_key}")
+async def get_notes(candidate_key: str):
+    """Get all notes for a candidate."""
+    return db_service.get_notes(candidate_key)
+
+
+# ─────────────────────── Cleanup ───────────────────────
+
+@app.post("/cleanup-unknown")
+async def cleanup_unknown_candidates():
+    """Delete all sessions for 'Unknown Candidate' to free MongoDB Atlas storage."""
+    sessions = db_service.get_all_sessions()
+    deleted = 0
+    for s in sessions:
+        candidate = s.get("candidate", "")
+        if not candidate or candidate == "Unknown Candidate" or candidate == "Unknown" or candidate == "":
+            sid = s.get("session_id", "")
+            if sid:
+                db_service.delete_session_data(sid)
+                if sid in active_sessions:
+                    del active_sessions[sid]
+                deleted += 1
+    return {"status": "cleaned", "deleted_sessions": deleted}
 
 
 # ─────────────────────── Startup ───────────────────────

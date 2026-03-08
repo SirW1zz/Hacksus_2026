@@ -49,8 +49,20 @@ export default function App() {
     suggestions: []
   });
 
-  const transcriptEndRef = useRef<HTMLDivElement>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const transcriptEndRef = useRef<HTMLDivElement>(null);
+  const [meetEnded, setMeetEnded] = useState(false);
+  const [isEnding, setIsEnding] = useState(false);
+
+  // Truncate labels to max 5 words
+  const truncateLabel = (text: string, maxWords = 5) => {
+    const words = text.split(/\s+/);
+    return words.length > maxWords ? words.slice(0, maxWords).join(" ") : text;
+  };
+
+  // Check if mood is tense/uncomfortable
+  const isTenseMood = (mood: string) =>
+    /tense|nervous|uncomfortable|anxious|stressed|awkward/i.test(mood);
 
   // Load session and connect
   useEffect(() => {
@@ -79,7 +91,7 @@ export default function App() {
     };
   }, []);
 
-  // Auto-scroll transcript
+  // Auto-scroll debug transcript
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [transcript]);
@@ -164,6 +176,11 @@ export default function App() {
           reason: data.data.reason,
         });
         setTimeout(() => setLiveQuestion(null), 20000);
+      } else if (data.type === "session_ended") {
+        // Backend confirmed the session ended — show finished state
+        setMeetEnded(true);
+        setIsEnding(false);
+        if (timerRef.current) clearInterval(timerRef.current);
       }
     };
 
@@ -182,17 +199,57 @@ export default function App() {
     chrome.runtime.sendMessage({ type: "CONNECT_WS", sessionId }).catch(() => {});
     setIsConnected(true);
 
-    // Tell the active Meet tab to start scraping (in case it hasn't already)
-    chrome.tabs.query({ url: "https://meet.google.com/*" }).then((tabs) => {
-      for (const tab of tabs) {
-        if (tab.id) {
-          chrome.tabs.sendMessage(tab.id, {
-            type: "START_SCRAPING",
-            sessionId,
-          }).catch(() => {});
-        }
-      }
-    });
+    const startScraping = () => {
+       chrome.tabs.query({ url: "https://meet.google.com/*" }).then((tabs) => {
+         for (const tab of tabs) {
+           if (tab.id) {
+             chrome.tabs.sendMessage(tab.id, {
+               type: "START_SCRAPING",
+               sessionId,
+             }).catch(() => {
+                // Fails if content script isn't running (e.g. extension updated/reloaded during ongoing meeting).
+                // Dynamically inject the WXT-built content script.
+                if (chrome.scripting) {
+                   console.log("[Interview Intel] Content script not found, injecting dynamically...");
+                   chrome.scripting.executeScript({
+                      target: { tabId: tab.id! },
+                      files: ["content-scripts/content.js"]
+                   }).then(() => {
+                      setTimeout(() => {
+                        chrome.tabs.sendMessage(tab.id!, {
+                           type: "START_SCRAPING",
+                           sessionId,
+                        }).catch(err => console.error("[Interview Intel] Still failed after inject", err));
+                      }, 500);
+                   }).catch(err => console.error("[Interview Intel] Inject failed:", err));
+                }
+             });
+           }
+         }
+       });
+    };
+
+    startScraping();
+
+    // ROBUST TRIGGER: Ping every 10s to ensure content script is alive
+    const pingInterval = setInterval(() => {
+       chrome.tabs.query({ url: "https://meet.google.com/*" }).then((tabs) => {
+         if (tabs.length === 0) {
+            // No Meet tabs found — if we were interviewing, this is a sign it might have ended
+            // but we'll let the background script handle the definitive end.
+            return;
+         }
+         for (const tab of tabs) {
+           if (tab.id) {
+             chrome.tabs.sendMessage(tab.id, { type: "PING" })
+               .then((resp) => {
+                  if (!resp || resp.type !== "PONG") startScraping();
+               })
+               .catch(() => startScraping());
+           }
+         }
+       });
+    }, 10000);
 
     timerRef.current = setInterval(() => {
       setElapsedTime((t) => t + 1);
@@ -200,6 +257,7 @@ export default function App() {
 
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
+      clearInterval(pingInterval);
     };
   }, [sessionId]);
 
@@ -208,9 +266,23 @@ export default function App() {
   };
 
   const endInterview = async () => {
+    if (isEnding) return; // Prevent double-click
+    setIsEnding(true);
+
+    // 1. Tell background to end interview (sends WS end_interview + stops capture)
     chrome.runtime.sendMessage({ type: "END_INTERVIEW", sessionId }).catch(() => {});
-    
-    // Trigger summary generation gracefully in background
+
+    // 2. Stop content scripts from scraping
+    try {
+      const meetTabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
+      for (const tab of meetTabs) {
+        if (tab.id) {
+          chrome.tabs.sendMessage(tab.id, { type: "STOP_SCRAPING" }).catch(() => {});
+        }
+      }
+    } catch {}
+
+    // 3. Trigger summary generation in backend
     const form = new FormData();
     form.append("session_id", sessionId);
     fetch(`${API_BASE}/generate-summary`, {
@@ -218,8 +290,11 @@ export default function App() {
       body: form,
     }).catch(console.error);
 
+    // 4. Mark ended locally
+    setMeetEnded(true);
+    setIsEnding(false);
+    if (timerRef.current) clearInterval(timerRef.current);
     await chrome.storage.local.set({ isLive: false, sessionId: "" });
-    window.close();
   };
 
   const formatTime = (s: number) => {
@@ -279,33 +354,44 @@ export default function App() {
             <div className="live-status-grid">
               <div className="status-card speaker">
                 <span className="sc-label">Speaking Now</span>
-                <span className="sc-val">{insights.speaker}</span>
+                <span className="sc-val">{truncateLabel(insights.speaker)}</span>
               </div>
               <div className="status-card mood">
                 <span className="sc-label">Convo Mood</span>
-                <span className="sc-val">{insights.mood}</span>
+                <span className="sc-val">{truncateLabel(insights.mood)}</span>
               </div>
               <div className="status-card attitude">
                 <span className="sc-label">Candidate Attitude</span>
-                <span className="sc-val">{insights.attitude}</span>
+                <span className="sc-val">{truncateLabel(insights.attitude)}</span>
               </div>
               <div className="status-card honesty">
                 <span className="sc-label">Candidate Honesty</span>
-                <span className="sc-val">{insights.honesty}</span>
+                <span className="sc-val">{truncateLabel(insights.honesty)}</span>
               </div>
             </div>
 
-            {/* Live Suggestions Area */}
+            {/* Mood-based comfort suggestions when tense */}
+            {isTenseMood(insights.mood) && (
+              <div className="comfort-banner">
+                <span className="comfort-icon">🫶</span>
+                <span>Mood seems tense — try a lighter question to ease the conversation</span>
+              </div>
+            )}
+
+            {/* Dynamic Questions Area (expanded — replaces old debug transcript) */}
             <div className="suggestions-area">
-              <h3>⚡ Dynamic Suggestions</h3>
+              <h3>⚡ Dynamic Questions</h3>
               {insights.suggestions.length === 0 ? (
                 <div className="suggestion-empty">
                   Monitoring conversation for suggestions...
                 </div>
               ) : (
-                insights.suggestions.map((s, i) => (
-                  <div key={i} className={`suggest-item priority-${s.priority || 'medium'}`}>
-                    <p className="suggest-text">{s.text}</p>
+                insights.suggestions.slice(0, 5).map((s, i) => (
+                  <div key={i} className={`suggest-item priority-${s.priority || 'medium'} ${s.is_addon ? 'is-addon' : ''}`}>
+                    <div className="suggest-header">
+                       <p className="suggest-text">{s.text}</p>
+                       {s.is_addon && <span className="addon-badge">dig deeper</span>}
+                    </div>
                     <span className="suggest-reason">💡 {s.reason}</span>
                   </div>
                 ))
@@ -338,22 +424,27 @@ export default function App() {
               </div>
             )}
 
-            {/* Debug Transcript Area */}
-            <div className="mini-transcript" style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '250px', overflowY: 'auto', padding: '12px', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', marginTop: '16px' }}>
-              <span className="mt-label" style={{ fontWeight: 600, color: '#94a3b8', fontSize: '0.75rem', letterSpacing: '0.05em' }}>LATEST TRANSCRIPT:</span>
-              {transcript.length > 0 ? (
-                transcript.slice(-20).map((t, i) => (
-                  <div key={i} style={{ fontSize: '0.85rem', lineHeight: 1.4, color: '#e2e8f0' }}>
-                    <strong style={{ color: t.speaker.includes('Participant') || t.speaker === 'Unknown' ? '#a855f7' : '#3b82f6', marginRight: '6px' }}>
-                      [{t.speaker}]
-                    </strong>
-                    {t.text}
-                  </div>
-                ))
-              ) : (
-                <p className="mt-text" style={{ fontStyle: 'italic', color: '#64748b' }}>Waiting for speech...</p>
-              )}
-              <div ref={transcriptEndRef} />
+            {/* Mini Debug Transcript (small, at bottom) */}
+            <div className="mini-transcript">
+              <div className="mt-header">
+                <span className="mt-label">📝 LIVE TRANSCRIPT</span>
+                <span className="mt-count">{transcript.length} entries</span>
+              </div>
+              <div className="mt-scroll">
+                {transcript.length > 0 ? (
+                  transcript.slice(-10).map((t, i) => (
+                    <div key={i} className="mt-entry">
+                      <strong className={t.speaker === 'Interviewer' ? 'mt-interviewer' : 'mt-candidate'}>
+                        [{t.speaker}]
+                      </strong>
+                      {' '}{t.text.substring(0, 100)}{t.text.length > 100 ? '...' : ''}
+                    </div>
+                  ))
+                ) : (
+                  <p className="mt-empty">Waiting for speech...</p>
+                )}
+                <div ref={transcriptEndRef} />
+              </div>
             </div>
           </div>
         )}
@@ -528,9 +619,18 @@ export default function App() {
 
       {/* Footer Actions */}
       <footer className="sp-footer">
-        <button className="btn-end" onClick={endInterview}>
-          ⏹️ End Interview
-        </button>
+        {meetEnded ? (
+          <div className="end-banner">
+            <span>✅ Interview ended — report is being generated</span>
+            <button className="btn-dashboard" onClick={() => window.open(chrome.runtime.getURL('dashboard.html'), '_blank')}>
+              📊 Open Dashboard
+            </button>
+          </div>
+        ) : (
+          <button className="btn-end" onClick={endInterview} disabled={isEnding}>
+            {isEnding ? "⏳ Ending..." : "⏹️ End Interview"}
+          </button>
+        )}
       </footer>
     </div>
   );

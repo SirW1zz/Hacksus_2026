@@ -104,6 +104,18 @@ def get_full_transcript(session_id: str) -> list:
     return list(docs)
 
 
+def get_transcript_since(session_id: str, since_dt: datetime) -> list:
+    """Get transcript chunks created after a specific time."""
+    docs = transcripts_col.find(
+        {
+            "session_id": session_id,
+            "created_at": {"$gt": since_dt}
+        },
+        {"_id": 0},
+    ).sort("created_at", 1)
+    return list(docs)
+
+
 def get_transcript_text(session_id: str) -> str:
     """Get the full transcript as a plain text string."""
     chunks = get_full_transcript(session_id)
@@ -122,3 +134,28 @@ def delete_session_data(session_id: str):
     resumes_col.delete_many({"session_id": session_id})
     transcripts_col.delete_many({"session_id": session_id})
     sessions_col.delete_one({"session_id": session_id})
+
+
+# ──────────────── Notes Operations ────────────────
+
+notes_col = db["candidate_notes"]
+
+
+def save_note(candidate_key: str, note_text: str) -> str:
+    """Save a note for a candidate (keyed by phone or name)."""
+    doc = {
+        "candidate_key": candidate_key,
+        "text": note_text,
+        "created_at": datetime.now(timezone.utc),
+    }
+    result = notes_col.insert_one(doc)
+    return str(result.inserted_id)
+
+
+def get_notes(candidate_key: str) -> list:
+    """Get all notes for a candidate."""
+    docs = notes_col.find(
+        {"candidate_key": candidate_key},
+        {"_id": 0},
+    ).sort("created_at", -1)
+    return list(docs)

@@ -733,13 +733,37 @@ body {
   transition: width 1s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-/* ── Mini Transcript ── */
-.mini-transcript {
-  margin-top: auto;
-  padding: 12px;
-  background: linear-gradient(to bottom, rgba(0,0,0,0), rgba(124, 92, 252, 0.05));
+/* ── Comfort Banner (Tense Mood) ── */
+.comfort-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
   border-radius: var(--radius);
+  background: rgba(255, 179, 71, 0.08);
+  border: 1px solid rgba(255, 179, 71, 0.2);
+  font-size: 12px;
+  color: var(--warning);
+  font-weight: 500;
+  animation: fadeIn 0.4s ease-out;
+}
+
+.comfort-icon {
+  font-size: 18px;
+}
+
+/* ── Mini Debug Transcript ── */
+.mini-transcript {
+  margin-top: 16px;
   border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.mt-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
 }
 
 .mt-label {
@@ -747,19 +771,93 @@ body {
   font-weight: 700;
   color: var(--accent);
   text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
-.mt-text {
+.mt-count {
+  font-size: 9px;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.mt-scroll {
+  max-height: 150px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  background: rgba(255,255,255,0.02);
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+
+.mt-entry {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
+.mt-interviewer { color: #3b82f6; margin-right: 4px; }
+.mt-candidate { color: #a855f7; margin-right: 4px; }
+
+.mt-empty {
   font-size: 11px;
   color: var(--text-dim);
-  margin-top: 4px;
   font-style: italic;
-  line-height: 1.4;
 }
 
-/* ── Overrides for existing tabs ── */
-.competency-section {
-  display: none; /* Hidden because we show it in Insights now, or kept purely for other tabs */
+/* ── End Banner ── */
+.end-banner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--success);
+  font-weight: 600;
+}
+
+.btn-dashboard {
+  padding: 6px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: rgba(124, 92, 252, 0.1);
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-dashboard:hover {
+  background: rgba(124, 92, 252, 0.2);
 }
 
 .tab:active { transform: scale(0.95); }
+
+/* ── Add-on Suggestions ── */
+.suggest-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.addon-badge {
+  background: #6366f1;
+  color: white;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  font-weight: 700;
+  white-space: nowrap;
+  margin-top: 2px;
+}
+
+.suggest-item.is-addon {
+  border-left: 3px solid #6366f1;
+}
+

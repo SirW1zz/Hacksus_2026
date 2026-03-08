@@ -59,7 +59,7 @@ If the segment is silent or very short, prioritize an "icebreaker" suggesting ho
 
 async def analyze_transcript_chunk_consolidated(text: str, resume_data: dict) -> dict:
     """Consolidated endpoint to flag vagueness, contradictions, and generate questions in ONE Gemini call."""
-    prompt = f"""You are an advanced interview copilot AI. Analyze the candidate's latest verbal statement and compare it to their resume.
+    prompt = f"""You are an advanced interview copilot. Analyze the candidate's latest statement vs their resume.
 
 VERBAL STATEMENT:
 {text}
@@ -67,13 +67,15 @@ VERBAL STATEMENT:
 RESUME DATA:
 {json.dumps(resume_data, indent=2, default=str)[:3000]}
 
-Perform tasks and return ONE comprehensive JSON:
-1. Vagueness check: Is the answer vague or deflecting?
-2. Contradiction check: Does the verbal claim contradict the resume?
-3. Insights: Mood and Attitude detection.
-4. Suggestions: 1-2 sharp follow-up or icebreaker questions.
+RULES:
+- Mood, attitude, honesty: MAX 3 words each (e.g. "Calm & Focused", "Nervous", "Authentic").
+- Only change mood/attitude if the shift is SUSTAINED (not fleeting).
+- Generate 4-5 dynamic follow-up questions. Each question MUST be under 10 words.
+- If mood is tense/nervous/uncomfortable, include 1-2 comfort/icebreaker questions to ease the conversation.
+- LOOK FOR MISSED OPPORTUNITIES: If the candidate gives an incomplete or surface-level answer, provide an "add-on" question to help the interviewer dig deeper into that specific point.
+- Only suggest RELEVANT questions based on what was actually said.
 
-Return EXACTLY this JSON structure:
+Return EXACTLY this JSON:
 {{
   "vagueness": {{
     "is_vague": true/false,
@@ -87,13 +89,13 @@ Return EXACTLY this JSON structure:
     ]
   }},
   "insights": {{
-    "mood": "convo mood",
-    "attitude": "candidate attitude",
-    "honesty": "candidate honesty",
+    "mood": "max 3 words",
+    "attitude": "max 3 words",
+    "honesty": "max 3 words",
     "speaker": "who's talking"
   }},
   "suggestions": [
-     {{"question": "...", "reason": "...", "priority": "high|medium"}}
+     {{"question": "under 10 words", "reason": "short reason", "priority": "high|medium", "is_addon": true/false}}
   ]
 }}"""
 

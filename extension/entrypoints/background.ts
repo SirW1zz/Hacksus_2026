@@ -35,7 +35,7 @@ export default defineBackground(() => {
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
-        chrome.runtime.sendMessage({ type: "WS_MESSAGE", data: msg }).catch(() => {});
+        chrome.runtime.sendMessage({ type: "WS_MESSAGE", data: msg }).catch(() => { });
       } catch (e) {
         console.error("[Interview Intel] Failed to parse WS message:", e);
       }
@@ -133,7 +133,7 @@ export default defineBackground(() => {
 
     try {
       await chrome.runtime.sendMessage({ type: "STOP_CAPTURE" });
-    } catch {}
+    } catch { }
 
     // Close offscreen document
     try {
@@ -143,7 +143,7 @@ export default defineBackground(() => {
       if (existingContexts.length > 0) {
         await chrome.offscreen.closeDocument();
       }
-    } catch {}
+    } catch { }
 
     isCapturing = false;
     console.log("[Interview Intel] Tab capture stopped");
@@ -173,7 +173,7 @@ export default defineBackground(() => {
             text: msg.text,
             is_final: true,
           },
-        }).catch(() => {});
+        }).catch(() => { });
         sendResponse({ status: "relayed" });
         break;
 
@@ -188,7 +188,7 @@ export default defineBackground(() => {
         chrome.runtime.sendMessage({
           type: "WS_MESSAGE",
           data: { type: "deepgram_status", status: msg.status },
-        }).catch(() => {});
+        }).catch(() => { });
         sendResponse({ status: "ok" });
         break;
 
@@ -211,7 +211,7 @@ export default defineBackground(() => {
             text: msg.text,
             is_final: true,
           },
-        }).catch(() => {});
+        }).catch(() => { });
         sendResponse({ status: "relayed" });
         break;
 
@@ -279,11 +279,28 @@ export default defineBackground(() => {
         break;
 
       case "END_INTERVIEW":
-        sendToBackend({ type: "end_interview" });
-        stopTabCapture();
-        setTimeout(() => { if (ws) { ws.close(); ws = null; } }, 1000);
-        sendResponse({ status: "ending" });
-        break;
+        (async () => {
+          // Stop content scripts in ALL Meet tabs
+          try {
+            const meetTabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
+            for (const tab of meetTabs) {
+              if (tab.id) {
+                chrome.tabs.sendMessage(tab.id, { type: "STOP_SCRAPING" }).catch(() => { });
+              }
+            }
+          } catch { }
+
+          // Send end_interview to backend
+          sendToBackend({ type: "end_interview" });
+          // Stop tab capture
+          await stopTabCapture();
+          // Close WS after brief delay to let end_interview go through
+          setTimeout(() => { if (ws) { ws.close(); ws = null; } }, 2000);
+          // Clear local state
+          chrome.storage.local.set({ isLive: false, sessionId: "" }).catch(() => { });
+          sendResponse({ status: "ending" });
+        })();
+        return true; // async
 
       default:
         break;
@@ -316,21 +333,73 @@ export default defineBackground(() => {
         type: "START_SCRAPING",
         sessionId: data.sessionId,
       }).catch(() => {
-        // Content script might not be loaded yet, that's fine
+         // Dynamically inject if missing (e.g. extension was reloaded)
+         if (chrome.scripting) {
+            chrome.scripting.executeScript({
+               target: { tabId },
+               files: ["content-scripts/content.js"]
+            }).then(() => {
+               setTimeout(() => {
+                  chrome.tabs.sendMessage(tabId, { type: "START_SCRAPING", sessionId: data.sessionId }).catch(()=>{});
+               }, 500);
+            }).catch(()=>{});
+         }
       });
 
       // Also try tab capture for Deepgram (bonus quality)
       if (!isCapturing) {
-        await startTabCapture(tabId, data.sessionId).catch(() => {});
+        await startTabCapture(tabId, data.sessionId).catch(() => { });
       }
     } catch (err) {
       console.error(`[Interview Intel] Failed to setup side panel for tab ${tabId}:`, err);
     }
   }
 
+  /**
+   * Full cleanup when the meeting ends — called from tab close or URL change.
+   */
+  async function autoEndSession() {
+    const data = await chrome.storage.local.get(["isLive", "sessionId"]);
+    if (!data.isLive || !data.sessionId) return;
+
+    console.log("[Interview Intel] Auto-ending session:", data.sessionId);
+
+    // Stop all content scripts
+    try {
+      const meetTabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
+      for (const tab of meetTabs) {
+        if (tab.id) {
+          chrome.tabs.sendMessage(tab.id, { type: "STOP_SCRAPING" }).catch(() => { });
+        }
+      }
+    } catch { }
+
+    // Tell backend to end
+    sendToBackend({ type: "end_interview" });
+    await stopTabCapture();
+
+    // Notify the side panel that the meeting ended
+    chrome.runtime.sendMessage({
+      type: "WS_MESSAGE",
+      data: { type: "session_ended" },
+    }).catch(() => { });
+
+    setTimeout(() => { if (ws) { ws.close(); ws = null; } }, 2000);
+    chrome.storage.local.set({ isLive: false, sessionId: "" }).catch(() => { });
+  }
+
   chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     if (changeInfo.status === "complete" && tab.url?.includes("meet.google.com")) {
       ensureSidePanelOpen(tabId);
+    }
+
+    // Detect when a Meet tab navigates AWAY from the meeting (user left or meeting ended)
+    if (changeInfo.url && !changeInfo.url.includes("meet.google.com")) {
+      // This tab was on Meet but navigated away — check if it was our last Meet tab
+      const meetTabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
+      if (meetTabs.length === 0) {
+        autoEndSession();
+      }
     }
   });
 
@@ -349,16 +418,12 @@ export default defineBackground(() => {
     }
   });
 
-  chrome.tabs.onRemoved.addListener(async (tabId) => {
-    if (isCapturing) {
-      const meetTabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
-      if (meetTabs.length === 0) {
-        console.log("[Interview Intel] Last Meet tab closed, ending session automatically.");
-        sendToBackend({ type: "end_interview" });
-        stopTabCapture();
-        setTimeout(() => { if (ws) { ws.close(); ws = null; } }, 1000);
-        chrome.storage.local.set({ isLive: false, sessionId: "" }).catch(() => {});
-      }
+  chrome.tabs.onRemoved.addListener(async (_tabId) => {
+    // Check if any Meet tabs remain
+    const meetTabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
+    if (meetTabs.length === 0) {
+      console.log("[Interview Intel] Last Meet tab closed, ending session automatically.");
+      autoEndSession();
     }
   });
 });

@@ -11,7 +11,7 @@ export default defineConfig({
     description:
       "AI-powered real-time interview copilot for Google Meet — transcribes, analyzes, and suggests follow-up questions.",
     version: "1.0.0",
-    permissions: ["activeTab", "sidePanel", "storage", "tabs", "tabCapture", "offscreen"],
+    permissions: ["activeTab", "sidePanel", "storage", "tabs", "tabCapture", "offscreen", "scripting"],
     host_permissions: ["https://meet.google.com/*"],
     side_panel: {
       default_path: "sidepanel.html",

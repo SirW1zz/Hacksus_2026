@@ -190,13 +190,17 @@ RESUME DATA:
 Return JSON:
 {{
   "candidate_name": "Extract their name from the resume or transcript, or Unknown",
-  "overall_mood": "e.g., Chill, Focused, Tense, Academic, Conversational",
-  "overall_attitude": "e.g., Confident, Nervous, Evasive, Enthusiastic",
+  "overall_mood": "e.g., Chill, Focused, Tense",
+  "overall_attitude": "e.g., Confident, Nervous, Enthusiastic",
   "tldr": "2-3 sentence summary of the interview",
+  "interview_narrative": "A detailed 4-6 sentence narrative of how the interview flowed — what topics were covered, how the candidate responded, key moments, and the overall arc of the conversation.",
+  "hirable": true or false,
+  "hire_verdict": "STRONG HIRE | HIRE | MAYBE | NO HIRE | STRONG NO HIRE",
+  "hire_reasoning": "2-3 sentences explaining the hiring recommendation",
   "overall_recommendation": "strong_hire|hire|maybe|no_hire|strong_no_hire",
   "confidence_level": 0-100,
   "competency_scores": [
-    {{"competency": "...", "score": 0-10, "evidence": "..."}}
+    {{"competency": "...", "initial_score": 0-10, "final_score": 0-10, "evidence": "..."}}
   ],
   "strengths": ["..."],
   "concerns": ["..."],
@@ -208,7 +212,14 @@ Return JSON:
   }},
   "hiring_risks": ["..."],
   "recommended_next_steps": ["..."]
-}}"""
+}}
+
+IMPORTANT:
+- For competency_scores, "initial_score" is what you'd estimate from the resume alone, "final_score" is after hearing the interview.
+- "hirable" must be a boolean true/false.
+- "hire_verdict" must be one of: STRONG HIRE, HIRE, MAYBE, NO HIRE, STRONG NO HIRE.
+- "interview_narrative" should read like a story of the interview.
+"""
 
     text = await call_gemini(prompt)
     try:
